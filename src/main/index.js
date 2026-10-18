@@ -20,6 +20,26 @@ let selectionController = null;
 let selectionReader = null;
 let selectionTranslationEnabled = true;
 let apiServerStatus = { running: false, port: 27149, error: '', lastSyncAt: 0, lastSyncSummary: '' };
+let selectionDiagnosticFile = null;
+
+function reportSelectionDiagnostic(event) {
+  // Deliberately exclude selected text, clipboard data and exception messages.
+  const safeToken = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(value) ? value : 'unknown';
+  const entry = { time: new Date().toISOString(), stage: safeToken(event.stage), status: safeToken(event.status) };
+  if (Number.isFinite(event.elapsedMs)) entry.elapsedMs = Math.round(event.elapsedMs);
+  if (Number.isInteger(event.attempt)) entry.attempt = event.attempt;
+  if (event.trigger) entry.trigger = safeToken(event.trigger);
+  if (event.phase) entry.phase = safeToken(event.phase);
+  if (Number.isInteger(event.exitCode)) entry.exitCode = event.exitCode;
+  if (typeof event.errorType === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(event.errorType)) entry.errorType = event.errorType;
+  if (!selectionDiagnosticFile) return;
+  try {
+    if (fs.existsSync(selectionDiagnosticFile) && fs.statSync(selectionDiagnosticFile).size > 256 * 1024) {
+      fs.renameSync(selectionDiagnosticFile, selectionDiagnosticFile + '.previous');
+    }
+    fs.appendFileSync(selectionDiagnosticFile, JSON.stringify(entry) + '\n', 'utf8');
+  } catch { /* Diagnostics must never interrupt input handling. */ }
+}
 
 // ── 默认设置 ──────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
@@ -324,7 +344,7 @@ function showIcon(text) {
   if (iconHideTimer) clearTimeout(iconHideTimer);
   iconHideTimer = setTimeout(() => {
     if (iconWindow && !iconWindow.isDestroyed()) iconWindow.hide();
-  }, 1000);
+  }, 3000);
 }
 
 function hideIcon() {
@@ -494,17 +514,19 @@ function startDoubleCtrlCDetection() {
 
   try {
     const { uIOhook, UiohookKey } = require('uiohook-napi');
-    selectionReader = createSelectionReader();
+    selectionReader = createSelectionReader({ reportDiagnostic: reportSelectionDiagnostic });
     selectionController = createSelectionTranslationController({
       hook: uIOhook,
       keys: UiohookKey,
       enabled: selectionTranslationEnabled,
       readSelection: point => selectionReader.read(point),
       cancelReadSelection: () => selectionReader.cancel(),
+      reportDiagnostic: reportSelectionDiagnostic,
       readClipboard: () => clipboard.readText(),
       showIcon, hideIcon, showOverlay,
       isOwnWindowFocused: (point) => {
         if (BrowserWindow.getFocusedWindow()) return true;
+        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
         // Floating windows can receive clicks without taking keyboard focus.
         const dipPoint = screen.screenToDipPoint({ x: point.x, y: point.y });
         return [iconWindow, overlayWindow, screenshotWindow].some(win => {
@@ -1054,6 +1076,7 @@ function startApiServer() {
 app.whenReady().then(() => {
   DATA_FILE = path.join(app.getPath('userData'), 'voca-words.json');
   SETTINGS_FILE = path.join(app.getPath('userData'), 'voca-settings.json');
+  selectionDiagnosticFile = path.join(app.getPath('userData'), 'selection-diagnostics.jsonl');
   selectionTranslationEnabled = loadSettings().selectionTranslationEnabled !== false;
   createMainWindow();
   createOverlayWindow();

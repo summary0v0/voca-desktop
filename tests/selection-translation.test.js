@@ -3,7 +3,11 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { createSelectionTranslationController } = require('../src/main/selection-translation');
 
-const keys = { Ctrl: 1, CtrlRight: 2, C: 3 };
+const keys = {
+  Ctrl: 1, CtrlRight: 2, C: 3, Alt: 4, Tab: 5, ArrowLeft: 6,
+  Shift: 7, ShiftRight: 8, ArrowRight: 9, ArrowUp: 10, ArrowDown: 11,
+  Home: 12, End: 13, PageUp: 14, PageDown: 15, A: 16, Escape: 17,
+};
 
 function deferred() {
   let resolve, reject;
@@ -17,7 +21,10 @@ async function flushPromises() {
 
 function fixture(options = {}) {
   const hook = new EventEmitter();
-  const calls = { starts: 0, stops: 0, reads: 0, clipboardReads: 0, icons: [], overlays: [], hides: 0, cancellations: 0 };
+  const calls = {
+    starts: 0, stops: 0, reads: 0, clipboardReads: 0, icons: [], overlays: [],
+    hides: 0, cancellations: 0, readPoints: [], focusPoints: [], diagnostics: [],
+  };
   hook.start = () => { calls.starts++; };
   hook.stop = () => { calls.stops++; };
   let clock = 1000, nextTimerId = 1, ownWindowFocused = false;
@@ -25,13 +32,21 @@ function fixture(options = {}) {
   const controller = createSelectionTranslationController({
     hook,
     keys,
-    readSelection: () => { calls.reads++; return options.readSelection ? options.readSelection() : Promise.resolve('selected word'); },
+    readSelection: point => {
+      calls.reads++;
+      calls.readPoints.push(point);
+      return options.readSelection ? options.readSelection(point) : Promise.resolve('selected word');
+    },
     cancelReadSelection: () => { calls.cancellations++; },
     readClipboard: () => { calls.clipboardReads++; return options.clipboard ?? 'copied word'; },
     showIcon: text => calls.icons.push(text),
     hideIcon: () => { calls.hides++; },
     showOverlay: text => calls.overlays.push(text),
-    isOwnWindowFocused: () => ownWindowFocused,
+    isOwnWindowFocused: point => { calls.focusPoints.push(point); return ownWindowFocused; },
+    reportDiagnostic: diagnostic => {
+      calls.diagnostics.push(diagnostic);
+      if (options.reportDiagnostic) options.reportDiagnostic(diagnostic);
+    },
     schedule: (callback, delay) => {
       const id = nextTimerId++;
       timers.set(id, { callback, time: clock + delay });
@@ -55,7 +70,7 @@ function fixture(options = {}) {
     }
     clock = until;
   }
-  const keydown = keycode => hook.emit('keydown', { keycode });
+  const keydown = (keycode, modifiers = {}) => hook.emit('keydown', { keycode, ...modifiers });
   const keyup = keycode => hook.emit('keyup', { keycode });
   const drag = () => {
     hook.emit('mousedown', { button: 1, x: 100, y: 100 });
@@ -76,11 +91,9 @@ test('drag reads the current selection without reading or copying the clipboard'
   assert.deepEqual(f.calls.overlays, []);
 });
 
-test('ordinary clicks, unpaired mouseup, and selections inside Voca are ignored', async () => {
+test('unpaired mouseup and selections inside Voca are ignored', async () => {
   const f = fixture();
   f.hook.emit('mouseup', { button: 1, x: 150, y: 100 });
-  f.hook.emit('mousedown', { button: 1, x: 100, y: 100 });
-  f.hook.emit('mouseup', { button: 1, x: 105, y: 102 });
   f.setOwnWindowFocused(true);
   f.drag();
   f.advance(1000);
@@ -88,6 +101,327 @@ test('ordinary clicks, unpaired mouseup, and selections inside Voca are ignored'
   assert.equal(f.calls.reads, 0);
   assert.equal(f.calls.clipboardReads, 0);
   assert.deepEqual(f.calls.icons, []);
+});
+
+test('a two-pixel drag waits for a real selection and retains the gesture origin', async () => {
+  const f = fixture({ readSelection: async () => 'short selection' });
+  f.hook.emit('mousedown', { button: 1, x: 100, y: 100 });
+  f.hook.emit('mouseup', { button: 1, x: 102, y: 100 });
+  f.advance(99);
+  assert.equal(f.calls.reads, 0);
+  f.advance(1);
+  await flushPromises();
+  assert.deepEqual(f.calls.readPoints, [{ x: 102, y: 100, originX: 100, originY: 100 }]);
+  assert.deepEqual(f.calls.icons, ['short selection']);
+  assert.equal(f.calls.clipboardReads, 0);
+});
+
+test('a second nearby click captures double-click selection after it settles without reading the first click', async () => {
+  const f = fixture();
+  const click = () => {
+    f.hook.emit('mousedown', { button: 1, x: 100, y: 100 });
+    f.hook.emit('mouseup', { button: 1, x: 100, y: 100 });
+  };
+  click();
+  f.advance(50);
+  assert.equal(f.calls.reads, 0);
+  click();
+  f.advance(99);
+  assert.equal(f.calls.reads, 0);
+  f.advance(1);
+  await flushPromises();
+  assert.equal(f.calls.reads, 1);
+  assert.deepEqual(f.calls.icons, ['selected word']);
+});
+
+test('ordinary clicks and sub-two-pixel jitter cancel and hide without reading selection or clipboard', async () => {
+  const request = deferred();
+  const f = fixture({ readSelection: () => request.promise });
+  f.drag();
+  f.advance(100);
+  assert.equal(f.calls.reads, 1);
+  const hides = f.calls.hides;
+  f.hook.emit('mousedown', { button: 1, x: 150, y: 100 });
+  f.hook.emit('mouseup', { button: 1, x: 151, y: 100 });
+  assert.ok(f.calls.hides > hides);
+  request.resolve('old selection');
+  await flushPromises();
+  f.advance(1000);
+  f.hook.emit('mousedown', { button: 1, x: 151, y: 100 });
+  f.hook.emit('mouseup', { button: 1, x: 151, y: 100 });
+  f.advance(1000);
+  await flushPromises();
+  assert.equal(f.calls.reads, 1);
+  assert.deepEqual(f.calls.icons, []);
+  assert.equal(f.calls.clipboardReads, 0);
+});
+
+test('native double/triple click counts trigger selection even without fallback click history', async t => {
+  for (const clicks of [2, 3]) {
+    await t.test(`${clicks} clicks`, async () => {
+      const f = fixture();
+      f.hook.emit('mousedown', { button: 1, x: 100, y: 100, clicks });
+      f.hook.emit('mouseup', { button: 1, x: 100, y: 100, clicks });
+      f.advance(100);
+      await flushPromises();
+      assert.equal(f.calls.reads, 1);
+      assert.deepEqual(f.calls.icons, ['selected word']);
+      assert.equal(f.calls.clipboardReads, 0);
+    });
+  }
+});
+
+test('double-click fallback respects time, distance, and intervening input', async t => {
+  for (const [name, between, point] of [
+    ['too late', f => f.advance(501), { x: 100, y: 100 }],
+    ['too far', f => f.advance(50), { x: 106, y: 100 }],
+    ['wheel in between', f => f.hook.emit('wheel', { rotation: 1 }), { x: 100, y: 100 }],
+    ['keyboard in between', f => f.keydown(keys.Escape), { x: 100, y: 100 }],
+  ]) {
+    await t.test(name, async () => {
+      const f = fixture();
+      f.hook.emit('mousedown', { button: 1, x: 100, y: 100 });
+      f.hook.emit('mouseup', { button: 1, x: 100, y: 100 });
+      between(f);
+      f.hook.emit('mousedown', { button: 1, ...point });
+      f.hook.emit('mouseup', { button: 1, ...point });
+      f.advance(1000);
+      await flushPromises();
+      assert.equal(f.calls.reads, 0);
+      assert.deepEqual(f.calls.icons, []);
+    });
+  }
+});
+
+test('Shift+click can extend selection without pointer movement', async t => {
+  for (const source of ['hook modifier', 'tracked Shift key']) {
+    await t.test(source, async () => {
+      const f = fixture();
+      if (source === 'tracked Shift key') f.keydown(keys.Shift);
+      const modifier = source === 'hook modifier' ? { shiftKey: true } : {};
+      f.hook.emit('mousedown', { button: 1, x: 100, y: 100, ...modifier });
+      f.hook.emit('mouseup', { button: 1, x: 100, y: 100, ...modifier });
+      f.advance(100);
+      await flushPromises();
+      assert.equal(f.calls.reads, 1);
+      assert.deepEqual(f.calls.icons, ['selected word']);
+      assert.equal(f.calls.clipboardReads, 0);
+    });
+  }
+});
+
+test('keyboard selection reads the focused control without inventing pointer coordinates', async t => {
+  for (const keycode of [keys.ArrowLeft, keys.ArrowRight, keys.ArrowUp, keys.ArrowDown, keys.Home, keys.End, keys.PageUp, keys.PageDown]) {
+    await t.test(`Shift + ${keycode}`, async () => {
+      const f = fixture();
+      f.keydown(keys.ShiftRight);
+      f.keydown(keycode);
+      f.keyup(keycode);
+      f.keyup(keys.ShiftRight);
+      f.advance(100);
+      await flushPromises();
+      assert.deepEqual(f.calls.readPoints, [undefined]);
+      assert.ok(f.calls.focusPoints.every(point => point === undefined));
+      assert.deepEqual(f.calls.icons, ['selected word']);
+      assert.equal(f.calls.clipboardReads, 0);
+    });
+  }
+  await t.test('Ctrl+A after modifier release', async () => {
+    const f = fixture();
+    f.keydown(keys.Ctrl);
+    f.keydown(keys.A);
+    f.keyup(keys.A);
+    f.keyup(keys.Ctrl);
+    f.advance(100);
+    await flushPromises();
+    assert.deepEqual(f.calls.readPoints, [undefined]);
+    assert.deepEqual(f.calls.icons, ['selected word']);
+    assert.equal(f.calls.clipboardReads, 0);
+  });
+});
+
+test('repeated keyboard selection waits for the final movement and plain navigation cancels it', async () => {
+  const f = fixture();
+  f.keydown(keys.Shift);
+  f.keydown(keys.ArrowRight);
+  f.advance(60);
+  f.keydown(keys.ArrowRight);
+  f.advance(99);
+  assert.equal(f.calls.reads, 0);
+  f.advance(1);
+  await flushPromises();
+  assert.equal(f.calls.reads, 1);
+  assert.deepEqual(f.calls.icons, ['selected word']);
+  f.keydown(keys.ArrowRight);
+  f.keyup(keys.Shift);
+  f.keydown(keys.ArrowRight);
+  f.advance(100);
+  await flushPromises();
+  assert.equal(f.calls.reads, 1);
+});
+
+test('disabled keyboard selection and keyboard selection within Voca do not read', async () => {
+  const f = fixture({ enabled: false });
+  f.keydown(keys.Shift);
+  f.keydown(keys.Home);
+  f.advance(100);
+  f.controller.setEnabled(true);
+  f.setOwnWindowFocused(true);
+  f.keydown(keys.Ctrl);
+  f.keydown(keys.A);
+  f.advance(100);
+  await flushPromises();
+  assert.equal(f.calls.reads, 0);
+  assert.equal(f.calls.clipboardReads, 0);
+  assert.deepEqual(f.calls.icons, []);
+});
+
+test('a delayed empty selection is retried once without touching the clipboard', async () => {
+  let attempts = 0;
+  const f = fixture({ readSelection: async () => ++attempts === 1 ? '' : 'settled selection' });
+  f.drag();
+  f.advance(100);
+  await flushPromises();
+  assert.equal(f.calls.reads, 1);
+  f.advance(149);
+  assert.equal(f.calls.reads, 1);
+  f.advance(1);
+  await flushPromises();
+  assert.equal(f.calls.reads, 2);
+  assert.deepEqual(f.calls.icons, ['settled selection']);
+  assert.equal(f.calls.clipboardReads, 0);
+  assert.deepEqual(f.calls.diagnostics.map(({ status }) => status), ['scheduled', 'reading', 'empty', 'scheduled', 'reading', 'selected']);
+  assert.ok(!JSON.stringify(f.calls.diagnostics).includes('settled selection'));
+});
+
+test('empty selections stop after one retry and a failing diagnostic sink does not interrupt selection', async () => {
+  const f = fixture({ readSelection: async () => '', reportDiagnostic: () => { throw new Error('log unavailable'); } });
+  f.drag();
+  f.advance(100);
+  await flushPromises();
+  f.advance(150);
+  await flushPromises();
+  f.advance(1000);
+  await flushPromises();
+  assert.equal(f.calls.reads, 2);
+  assert.deepEqual(f.calls.icons, []);
+  assert.equal(f.calls.clipboardReads, 0);
+});
+
+test('navigation, disabling, stopping, and manual copying cancel a scheduled retry', async t => {
+  for (const [name, cancel] of [
+    ['navigation', f => f.keydown(keys.Escape)],
+    ['disable', f => f.controller.setEnabled(false)],
+    ['stop', f => f.controller.stop()],
+    ['manual copy', f => { f.keydown(keys.Ctrl); f.keydown(keys.C); f.keyup(keys.C); }],
+  ]) {
+    await t.test(name, async () => {
+      const f = fixture({ readSelection: async () => '' });
+      f.drag();
+      f.advance(100);
+      await flushPromises();
+      assert.equal(f.calls.reads, 1);
+      cancel(f);
+      f.advance(1000);
+      await flushPromises();
+      assert.equal(f.calls.reads, 1);
+      assert.deepEqual(f.calls.icons, name === 'manual copy' ? ['copied word'] : []);
+    });
+  }
+});
+
+test('focus moving to Voca before or during a selection read prevents its icon', async () => {
+  const request = deferred();
+  const f = fixture({ readSelection: () => request.promise });
+  f.drag();
+  f.setOwnWindowFocused(true);
+  f.advance(100);
+  assert.equal(f.calls.reads, 0);
+  f.setOwnWindowFocused(false);
+  f.drag();
+  f.advance(100);
+  assert.equal(f.calls.reads, 1);
+  f.setOwnWindowFocused(true);
+  request.resolve('obsolete selection');
+  await flushPromises();
+  assert.deepEqual(f.calls.icons, []);
+});
+
+test('scrolling and non-left clicks cancel delayed, in-flight, and retry selection reads', async t => {
+  for (const [name, interrupt] of [
+    ['wheel', f => f.hook.emit('wheel', { rotation: 1, x: 150, y: 100 })],
+    ['right click', f => f.hook.emit('mousedown', { button: 2, x: 150, y: 100 })],
+    ['middle click', f => f.hook.emit('mousedown', { button: 3, x: 150, y: 100 })],
+  ]) {
+    await t.test(name, async () => {
+      const request = deferred();
+      const f = fixture({ readSelection: () => request.promise });
+      f.drag();
+      interrupt(f);
+      f.advance(100);
+      assert.equal(f.calls.reads, 0);
+      f.drag();
+      f.advance(100);
+      assert.equal(f.calls.reads, 1);
+      interrupt(f);
+      request.resolve('selection before interruption');
+      await flushPromises();
+      assert.deepEqual(f.calls.icons, []);
+      f.advance(1000);
+      assert.equal(f.calls.reads, 1);
+
+      const retry = fixture({ readSelection: async () => '' });
+      retry.drag();
+      retry.advance(100);
+      await flushPromises();
+      interrupt(retry);
+      retry.advance(1000);
+      await flushPromises();
+      assert.equal(retry.calls.reads, 1);
+      assert.deepEqual(retry.calls.icons, []);
+      assert.equal(retry.calls.clipboardReads, 0);
+    });
+  }
+});
+
+test('scrolling hides an existing icon even over Voca and preserves a deliberate double-copy translation', async () => {
+  const f = fixture();
+  f.drag();
+  f.advance(100);
+  await flushPromises();
+  assert.deepEqual(f.calls.icons, ['selected word']);
+  f.setOwnWindowFocused(true);
+  const hides = f.calls.hides;
+  f.hook.emit('wheel', { rotation: 1, x: 150, y: 100 });
+  assert.ok(f.calls.hides > hides);
+
+  f.keydown(keys.Ctrl);
+  f.keydown(keys.C);
+  f.keyup(keys.C);
+  f.advance(50);
+  f.keydown(keys.C);
+  f.keyup(keys.C);
+  f.hook.emit('wheel', { rotation: 1, x: 150, y: 100 });
+  f.advance(100);
+  assert.deepEqual(f.calls.overlays, ['copied word']);
+});
+
+test('left and non-left clicks within Voca preserve the pending icon click and do not read again', async () => {
+  const f = fixture();
+  f.drag();
+  f.advance(100);
+  await flushPromises();
+  assert.deepEqual(f.calls.icons, ['selected word']);
+  f.setOwnWindowFocused(true);
+  const hides = f.calls.hides;
+  for (const button of [1, 2, 3]) {
+    f.hook.emit('mousedown', { button, x: 150, y: 100 });
+    f.hook.emit('mouseup', { button, x: 150, y: 100 });
+    f.advance(1000);
+    await flushPromises();
+    assert.equal(f.calls.hides, hides);
+    assert.equal(f.calls.reads, 1);
+  }
 });
 
 test('disabled selection translation ignores mouse selections and single Ctrl+C', async () => {
@@ -278,6 +612,6 @@ test('stopping removes listeners, cancels pending callbacks, and invalidates in-
   await flushPromises();
   assert.deepEqual(f.calls.icons, []);
   assert.deepEqual(f.calls.overlays, []);
-  for (const event of ['mousedown', 'mouseup', 'keydown', 'keyup']) assert.equal(f.hook.listenerCount(event), 0);
+  for (const event of ['mousedown', 'mouseup', 'wheel', 'keydown', 'keyup']) assert.equal(f.hook.listenerCount(event), 0);
   assert.equal(f.calls.stops, 1);
 });
