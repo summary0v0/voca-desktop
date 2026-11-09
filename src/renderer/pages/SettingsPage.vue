@@ -7,6 +7,7 @@
     <!-- 内部标签栏 -->
     <div class="s-tabs">
       <button class="s-tab" :class="{ active: stab === 'general' }" @click="stab = 'general'">基本设置</button>
+      <button class="s-tab" :class="{ active: stab === 'review' }" @click="stab = 'review'">闪卡复习</button>
       <button class="s-tab" :class="{ active: stab === 'presets' }" @click="stab = 'presets'">预设词表</button>
       <button class="s-tab" :class="{ active: stab === 'maintenance' }" @click="openMaintenance">维护</button>
     </div>
@@ -143,7 +144,7 @@
           <div class="s-row">
             <div class="s-row-body">
               <span class="s-label">每日复习目标</span>
-              <span class="s-desc">每天完成闪卡复习的单词数</span>
+              <span class="s-desc">每天正式复习的作答次数</span>
             </div>
             <input
               class="s-input s-input-num"
@@ -188,6 +189,19 @@
         <span class="save-error" v-if="saveError" role="alert">{{ saveError }}</span>
         <span class="save-hint" v-if="notice">{{ notice }}</span>
       </div>
+    </template>
+
+    <template v-if="stab === 'review'">
+      <section class="s-section review-settings">
+        <h2 class="s-title">闪卡复习</h2>
+        <div class="s-card">
+          <label class="s-row"><div class="s-row-body"><span class="s-label">目标保持率</span><span class="s-desc">保持率越高，通常需要越频繁地复习</span></div><select class="s-select" v-model.number="reviewOptions.retention" data-review-option="retention"><option :value="0.8">80%</option><option :value="0.85">85%</option><option :value="0.9">90%（推荐）</option><option :value="0.95">95%</option><option :value="0.97">97%</option></select></label>
+          <label class="s-row"><div class="s-row-body"><span class="s-label">每日新词上限</span><span class="s-desc">优先复习到期词，再加入限额内的新词；0 表示暂停新词</span></div><input class="s-input s-input-num" type="number" min="0" max="200" v-model.number="reviewOptions.newPerDay" data-review-option="newPerDay"></label>
+          <label class="s-row"><div class="s-row-body"><span class="s-label">重学间隔</span><span class="s-desc">忘记的词隔多少分钟再次出现</span></div><input class="s-input s-input-num" type="number" min="1" max="60" v-model.number="reviewOptions.relearnMinutes" data-review-option="relearnMinutes"><span class="s-desc">分钟</span></label>
+          <label class="s-row"><div class="s-row-body"><span class="s-label">每轮卡片数量</span><span class="s-desc">每轮开始的卡片数；重学卡片可能再次出现</span></div><select class="s-select" v-model.number="reviewOptions.batchSize" data-review-option="batchSize"><option v-for="n in [10, 20, 30, 50, 100, -1]" :key="n" :value="n">{{ n === -1 ? '全部' : n + ' 张' }}</option></select></label>
+        </div>
+      </section>
+      <div class="s-actions"><button class="btn-save btn-save-review" @click="saveReview" :disabled="saving">{{ saving ? '保存中…' : '保存复习设置' }}</button><span class="save-hint" v-if="saved" role="status">✓ 已保存</span><span class="save-error" v-if="saveError" role="alert">{{ saveError }}</span></div>
     </template>
 
     <!-- 预设词表 -->
@@ -252,13 +266,17 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { TIER1, TIER2, TIER3 } from '../shared/wordFrequency.js';
 import { WORD_BOOKS } from '../shared/wordBooks.js';
 
-const emit = defineEmits(['preset-imported']);
+const props = defineProps({ initialTab: { type: String, default: 'general' }, reviewOptions: Object });
+const emit = defineEmits(['preset-imported', 'committed']);
 
 const stab = ref('general');
+watch(() => props.initialTab, value => { stab.value = value; }, { immediate: true });
+const reviewOptions = ref({});
+watch(() => props.reviewOptions, value => { reviewOptions.value = { retention: .9, newPerDay: 10, relearnMinutes: 10, batchSize: 20, ...value }; }, { immediate: true });
 
 const settings = ref({
   translateApi: 'google',
@@ -439,6 +457,22 @@ async function save() {
   } finally {
     saving.value = false;
   }
+}
+
+async function saveReview() {
+  if (saving.value) return;
+  saving.value = true;
+  saved.value = false;
+  saveError.value = '';
+  try {
+    const snapshot = JSON.parse(JSON.stringify(reviewOptions.value));
+    const data = await window.vocaAPI.saveReviewOptions(snapshot);
+    emit('committed', data);
+    saved.value = true;
+    setTimeout(() => { saved.value = false; }, 2000);
+  } catch (err) {
+    saveError.value = `保存失败：${err?.message || '请重试'}`;
+  } finally { saving.value = false; }
 }
 
 async function importPreset(preset) {

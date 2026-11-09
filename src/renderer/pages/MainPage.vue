@@ -22,7 +22,7 @@
         <button class="nav-item" :class="{ active: tab === 'search' }" @click="tab = 'search'; globalSearch = ''">
           <span class="nav-icon">🔍</span> 全局搜索
         </button>
-        <button class="nav-item" :class="{ active: tab === 'settings' }" @click="tab = 'settings'">
+        <button class="nav-item" :class="{ active: tab === 'settings' }" @click="openSettings()">
           <span class="nav-icon">⚙️</span> 设置
         </button>
       </nav>
@@ -133,7 +133,7 @@
       </div>
 
       <!-- 闪卡复习 -->
-      <FlashCard v-if="tab === 'review'" :words="flashPool" :review-options="data.reviewOptions" :review-logs="data.reviewLogs" @committed="data = $event" style="flex:1;overflow:hidden;" />
+      <FlashCard v-if="tab === 'review'" :words="flashPool" :review-options="data.reviewOptions" :review-logs="data.reviewLogs" @committed="data = $event" @open-settings="openSettings('review')" @close-review="tab = 'words'" style="flex:1;overflow:hidden;" />
 
       <!-- 翻译工作台 -->
       <TranslatePage v-if="tab === 'translate'" ref="translateRef" style="flex:1;overflow:hidden;" />
@@ -174,7 +174,7 @@
 
       <!-- 设置 -->
       <div v-if="tab === 'settings'" class="settings-wrap">
-        <SettingsPage @preset-imported="onPresetImported" />
+        <SettingsPage :initial-tab="settingsTab" :review-options="data.reviewOptions" @committed="data = $event" @preset-imported="onPresetImported" />
       </div>
     </main>
   </div>
@@ -212,6 +212,8 @@ import WordDetail from '../components/WordDetail.vue';
 import StatsPage from './StatsPage.vue';
 
 const tab = ref('words');
+const settingsTab = ref('general');
+function openSettings(section = 'general') { settingsTab.value = section; tab.value = 'settings'; }
 const translateRef = ref(null);
 const detailWord = ref(null);
 const isDetailWordSaved = computed(() => {

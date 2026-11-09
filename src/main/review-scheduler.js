@@ -1,7 +1,7 @@
 const { fsrs, generatorParameters, createEmptyCard, State } = require('ts-fsrs');
 
 const DAY = 86400000;
-const DEFAULT_REVIEW_OPTIONS = Object.freeze({ retention: 0.9, newPerDay: 10, relearnMinutes: 10 });
+const DEFAULT_REVIEW_OPTIONS = Object.freeze({ retention: 0.9, newPerDay: 10, relearnMinutes: 10, batchSize: 20 });
 const copy = value => JSON.parse(JSON.stringify(value));
 const finite = (value, fallback) => Number.isFinite(value) ? value : fallback;
 
@@ -10,6 +10,7 @@ function reviewOptions(input = {}) {
   if (!Number.isFinite(options.retention) || options.retention < 0.8 || options.retention > 0.97) throw new Error('目标保持率应在 80%–97% 之间');
   if (!Number.isInteger(options.newPerDay) || options.newPerDay < 0 || options.newPerDay > 200) throw new Error('每日新词应在 0–200 之间');
   if (!Number.isInteger(options.relearnMinutes) || options.relearnMinutes < 1 || options.relearnMinutes > 60) throw new Error('重学间隔应在 1–60 分钟之间');
+  if (![10, 20, 30, 50, 100, -1].includes(options.batchSize)) throw new Error('每轮数量应为 10、20、30、50、100 或全部');
   return options;
 }
 

@@ -14,6 +14,8 @@ let win;
 let failWrite = false;
 let delayWrite = false;
 let events = 0;
+let optionWrites = 0;
+let failOptions = false;
 const errors = [];
 const clone = x => JSON.parse(JSON.stringify(x));
 const fresh = () => {
@@ -30,9 +32,11 @@ on('load-data', () => clone(data));
 on('save-data', value => { data = value; return true; });
 on('get-app-version', () => '1.0.9');
 on('load-settings', () => ({ dailyGoal: 10 }));
+on('get-login-item', () => false);
+on('get-sync-status', () => ({ running: false, port: 27149, error: '' }));
 on('get-word-detail', () => ({ success: true, meanings: [{ partOfSpeech: 'verb', definitions: [{ definition: 'SECRET_DEFINITION', example: 'SECRET_EXAMPLE' }], synonyms: ['SECRET_SYNONYM'] }] }));
 on('preview-review', identity => previewReview(data.flashPool.find(w => w.key === identity.key), data.reviewOptions));
-on('save-review-options', input => { data.reviewOptions = reviewOptions(input); return clone(data); });
+on('save-review-options', input => { if (failOptions) throw new Error('simulated settings failure'); optionWrites++; data.reviewOptions = reviewOptions(input); return clone(data); });
 on('review-card', async request => {
   events++;
   if (delayWrite) await new Promise(resolve => setTimeout(resolve, 150));
@@ -56,7 +60,7 @@ async function snapshot(name) {
 }
 async function openReview() {
   await js(`Array.from(document.querySelectorAll('.nav-item')).find(b => b.textContent.includes('闪卡复习')).click()`);
-  await waitFor(`!!document.querySelector('.setup-card')`);
+  await waitFor(`!!document.querySelector('.wc-word') || !!document.querySelector('.idle-actions')`);
 }
 app.whenReady().then(async () => {
   try {
@@ -65,16 +69,36 @@ app.whenReady().then(async () => {
     win.webContents.on('console-message', event => { if (event.level === 'error') errors.push(event.message); });
     await win.loadFile(path.join(__dirname, '../src/renderer/dist/index.html'));
     await waitFor(`document.querySelectorAll('.word-text').length === 3`);
+    await js(`Array.from(document.querySelectorAll('.nav-item')).find(b => b.textContent.includes('设置')).click()`);
+    await waitFor(`!!document.querySelector('.s-tabs')`);
+    await js(`Array.from(document.querySelectorAll('.s-tab')).find(b => b.textContent === '闪卡复习').click()`);
+    await waitFor(`!!document.querySelector('.review-settings')`);
+    assert.equal(await js(`document.querySelector('[data-review-option="batchSize"]').value`), '20');
+    await js(`const input=document.querySelector('[data-review-option="batchSize"]'); input.value='10'; input.dispatchEvent(new Event('change',{bubbles:true}));`);
+    failOptions = true;
+    await click('.btn-save-review');
+    await waitFor(`document.querySelector('.save-error')?.textContent.includes('保存失败')`);
+    assert.equal(data.reviewOptions.batchSize, undefined);
+    failOptions = false;
+    await click('.btn-save-review');
+    await waitFor(`!!document.querySelector('.save-hint')`);
+    assert.equal(data.reviewOptions.batchSize, 10);
+    assert.equal(optionWrites, 1);
+    await snapshot('review-settings');
     await openReview();
-    await snapshot('setup');
-    await click('.setup-card .btn-start');
     await waitFor(`document.querySelector('.wc-word')?.textContent === 'remember'`);
+    assert.equal(optionWrites, 1);
+    assert.equal(await js(`document.querySelectorAll('.review-options, .setup-card, input, select').length`), 0);
     assert.equal(await js(`document.body.textContent.includes('SECRET_DEFINITION')`), false);
     assert.equal(await js(`!!document.querySelector('.wc-trans')`), false);
     await snapshot('question');
     await click('.fc-session .word-card');
     await waitFor(`document.body.textContent.includes('SECRET_DEFINITION') && !document.querySelector('.fc-btn-known').disabled`);
     await snapshot('answer');
+    win.setContentSize(860, 520);
+    await snapshot('answer-small');
+    assert.equal(await js(`document.querySelector('.fc-btn-easy').getBoundingClientRect().bottom <= innerHeight`), true);
+    win.setContentSize(1060, 740);
     failWrite = true;
     await click('.fc-btn-unknown');
     await waitFor(`document.querySelector('.fc-message')?.textContent.includes('保存失败')`);
@@ -101,12 +125,18 @@ app.whenReady().then(async () => {
     data.books.default.words.remember = clone(waiting);
     await click('.fc-done .btn-start');
     win.webContents.send('words-updated');
-    await waitFor(`document.querySelector('.setup-card .btn-start').textContent.includes('1 张')`);
-    await click('.setup-card .btn-start');
+    await openReview();
     await waitFor(`document.querySelector('.wc-word')?.textContent === 'remember'`);
     await click('.exit-session');
+    // With only future cards, entering review shows a quiet completion state.
+    waiting.nextReview = Date.now() + 600000;
+    waiting.fsrs.due = new Date(waiting.nextReview).toISOString();
+    data.books.default.words.remember = clone(waiting);
     const scheduleBefore = JSON.stringify(data.flashPool);
-    await click('.setup-card .btn-start-all:last-of-type');
+    await openReview();
+    await waitFor(`document.body.textContent.includes('当前没有待复习卡片')`);
+    await snapshot('no-due');
+    await click('.idle-actions .btn-start-all');
     await waitFor(`document.querySelector('.sh-title')?.textContent.includes('提前练习')`);
     await click('.fc-session .word-card');
     await click('.fc-btn-easy');
@@ -115,12 +145,26 @@ app.whenReady().then(async () => {
     assert.equal(data.reviewLogs.at(-1).mode, 'practice');
     assert.equal(data.stats.todayReviewed, 2);
     await click('.exit-session');
+    data.flashPool = [];
+    await openReview();
+    await waitFor(`document.body.textContent.includes('闪卡池为空')`);
+    await click('.settings-link');
+    await waitFor(`!!document.querySelector('.review-settings')`);
+    assert.equal(await js(`document.querySelector('[data-review-option="batchSize"]').value`), '10');
     win.setContentSize(860, 520);
-    await snapshot('setup-small');
-    assert.equal(await js(`document.querySelector('.fc').scrollWidth > document.querySelector('.fc').clientWidth + 1`), false);
-    assert.equal(await js(`document.querySelector('.setup-card .btn-start').getBoundingClientRect().bottom <= innerHeight`), true);
+    await snapshot('settings-small');
+    assert.equal(await js(`document.querySelector('.settings-page').scrollWidth > document.querySelector('.settings-page').clientWidth + 1`), false);
+    // Persisted batch size controls each newly opened session.
+    data = fresh();
+    const many = Array.from({length: 25}, (_, i) => ({ ...data.flashPool[0], key: `card-${i}`, word: `card-${i}` }));
+    data.flashPool = many;
+    data.books.default.words = Object.fromEntries(many.map(w => [w.key, w]));
+    data.reviewOptions.batchSize = 10;
+    await openReview();
+    await waitFor(`document.querySelector('.shp-counter')?.textContent.includes('剩余 10 张')`);
+    assert.equal(optionWrites, 1);
     assert.deepEqual(errors, []);
-    const report = { passed: true, checks: ['hidden answers', 'four ratings', 'failure retry', 'double-click suppression', 'per-answer persistence', 'short-term waiting', 'resume', 'practice isolation', 'small window'], screenshots: out };
+    const report = { passed: true, checks: ['settings relocation and save retry', 'automatic review entry without settings writes', 'hidden answers', 'four ratings', 'failure retry', 'double-click suppression', 'per-answer persistence', 'short-term waiting', 'resume', 'practice isolation', 'empty and no-due states', 'persisted batch size', 'small window'], screenshots: out };
     fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
     app.exit(0);

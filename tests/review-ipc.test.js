@@ -54,9 +54,10 @@ test('real IPC saves card, log and statistics atomically and retries once', t =>
 test('review options save independently without rescheduling cards', t => {
   const f = fixture(t);
   const original = f.read().flashPool;
-  f.invoke('save-review-options', { newPerDay: 5, retention: .95, relearnMinutes: 15 });
+  f.invoke('save-review-options', { newPerDay: 5, retention: .95, relearnMinutes: 15, batchSize: 50 });
   assert.deepEqual(f.read().flashPool, original);
   assert.equal(f.read().reviewOptions.retention, .95);
+  assert.equal(f.read().reviewOptions.batchSize, 50);
   assert.throws(() => f.invoke('save-review-options', { retention: 2 }), /保持率/);
   assert.equal(f.read().reviewOptions.retention, .95);
 });

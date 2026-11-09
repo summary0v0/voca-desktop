@@ -1,46 +1,33 @@
 <template>
   <div class="fc">
-    <div class="fc-setup" v-if="mode === 'setup'">
-      <div class="setup-card">
-        <div class="setup-icon">🗂</div>
-        <h2>闪卡复习</h2>
-        <div v-if="!words.length" class="setup-empty">
-          <p>闪卡池为空</p><p class="setup-empty-hint">在生词本点击 ⚡ 将单词加入闪卡池</p>
-        </div>
-        <template v-else>
-          <div class="setup-stats"><span class="stat-due">{{ dueCount }} 词到期</span><span>· {{ newCount }} 个新词</span></div>
-          <div class="review-options">
-            <label>目标保持率 <select v-model.number="options.retention"><option :value="0.8">80%</option><option :value="0.85">85%</option><option :value="0.9">90%（推荐）</option><option :value="0.95">95%</option><option :value="0.97">97%</option></select></label>
-            <label>每日新词上限 <input type="number" v-model.number="options.newPerDay" min="0" max="200"></label>
-            <label>重学间隔（分钟） <input type="number" v-model.number="options.relearnMinutes" min="1" max="60"></label>
-          </div>
-          <div class="setup-hint">保持率越高，复习越频繁。今日还可学习 {{ remainingNew }} 个新词。</div>
-          <button class="btn-start-all" :disabled="busy" @click="saveOptions">保存复习设置</button>
-          <div class="setup-section-label">每轮最多开始的卡片数</div>
-          <div class="setup-counts"><button v-for="n in countOptions" :key="n" class="cnt-btn" :class="{ active: batchSize === n }" @click="batchSize = n">{{ n === -1 ? '全部' : n }}</button></div>
-          <div class="setup-hint">到期词优先，新词受每日限额控制；忘记的词会按重学间隔再次出现。</div>
-          <button class="btn-start" :disabled="busy || !availableCount" @click="startSession(false)">{{ availableCount ? `开始复习（${availableCount} 张）` : '今天暂时没有待复习卡片' }}</button>
-          <button class="btn-start-all" :disabled="busy" @click="startSession(true)">提前练习（不改变复习计划）</button>
-        </template>
-        <p class="fc-message" role="status" v-if="message">{{ message }}</p>
+    <div class="fc-done" v-if="mode === 'loading'"><p>正在准备卡片…</p></div>
+    <div class="fc-done" v-else-if="mode === 'idle'">
+      <div class="done-icon">{{ words.length ? '✅' : '🗂' }}</div>
+      <h2>{{ words.length ? '当前没有待复习卡片' : '闪卡池为空' }}</h2>
+      <p class="setup-hint">{{ words.length ? nextDueText : '在生词本点击 ⚡ 将单词加入闪卡池，再来开始背诵。' }}</p>
+      <p class="fc-message" role="alert" v-if="message">{{ message }}</p>
+      <div class="idle-actions">
+        <button v-if="message || availableCount" class="btn-start" :disabled="busy" @click="startSession(false)">{{ message ? '重试' : '继续背诵' }}</button>
+        <button v-if="words.length" class="btn-start-all" :disabled="busy" @click="startSession(true)">提前练习</button>
+        <button class="btn-start-all" @click="emit('close-review')">返回生词本</button>
+        <button class="settings-link" @click="emit('open-settings')">复习设置</button>
       </div>
     </div>
-
     <div class="fc-done" v-else-if="mode === 'done'">
       <div class="done-icon">✅</div><h2>{{ practice ? '本轮练习完成' : '本轮复习完成' }}</h2>
       <div class="done-stats"><div class="done-stat" v-for="r in ratings" :key="r.value"><div class="ds-n">{{ counts[r.value] || 0 }}</div><div class="ds-l">{{ r.label }}</div></div></div>
       <p class="setup-hint">每次作答均已保存{{ practice ? '；正式复习计划保持不变' : '' }}。</p>
-      <button class="btn-start" @click="mode = 'setup'">返回复习</button>
+      <div class="idle-actions"><button v-if="availableCount" class="btn-start" @click="startSession(false)">继续背诵</button><button class="btn-start-all" @click="startSession(true)">提前练习</button><button class="btn-start-all" @click="emit('close-review')">返回生词本</button></div>
     </div>
 
     <div class="fc-done" v-else-if="mode === 'session' && !current">
       <h2>这一批已答完，等待短时重学</h2>
       <p>{{ nextWaitingText }}</p><p class="setup-hint">可以留在这里等待，或稍后从复习入口继续，进度已保存。</p>
-      <button class="btn-start" @click="mode = 'setup'">稍后继续</button>
+      <div class="idle-actions"><button class="btn-start" @click="emit('close-review')">稍后继续</button></div>
     </div>
 
     <div class="fc-session" v-else-if="mode === 'session' && current">
-      <div class="session-header"><span class="sh-title">{{ practice ? '提前练习 · 不改计划' : '闪卡复习' }}</span><span class="shp-counter">已答 {{ answered }} 次 · 剩余 {{ queue.length }} 张</span><button class="exit-session" :disabled="busy" @click="mode = 'setup'">结束本轮</button></div>
+      <div class="session-header"><span class="sh-title">{{ practice ? '提前练习 · 不改计划' : '闪卡复习' }}</span><span class="shp-counter">已答 {{ answered }} 次 · 剩余 {{ queue.length }} 张</span><button class="exit-session" :disabled="busy" @click="emit('close-review')">结束本轮</button></div>
       <div class="session-body">
         <div class="word-card" :class="{ flipped }" @click="flip">
           <div class="wc-badge badge-learning">{{ stageLabel(current) }}</div>
@@ -88,12 +75,12 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useTTS } from '../composables/useTTS.js';
-import { cardId, isNewCard, isDue, buildQueue, newRemaining, stageLabel, formatInterval, DAY } from '../composables/review-queue.mjs';
+import { cardId, buildQueue, newRemaining, stageLabel, formatInterval, DAY } from '../composables/review-queue.mjs';
 
 const props = defineProps({ words: { type: Array, default: () => [] }, reviewOptions: Object, reviewLogs: Array });
-const emit = defineEmits(['committed']);
+const emit = defineEmits(['committed', 'open-settings', 'close-review']);
 const { speak: ttsSpeak } = useTTS();
-const mode = ref('setup');
+const mode = ref('loading');
 const queue = ref([]);
 const practice = ref(false);
 const flipped = ref(false);
@@ -101,11 +88,7 @@ const busy = ref(false);
 const message = ref('');
 const preview = ref(null);
 const counts = ref({});
-const batchSize = ref(20);
 const clock = ref(Date.now());
-const options = ref({ retention: 0.9, newPerDay: 10, relearnMinutes: 10 });
-watch(() => props.reviewOptions, v => { options.value = { retention: 0.9, newPerDay: 10, relearnMinutes: 10, ...v }; }, { immediate: true });
-const countOptions = [10, 20, 30, 50, 100, -1];
 const ratings = [
   { value: 1, label: '没想起来', class: 'fc-btn-unknown' },
   { value: 2, label: '费力想起', class: 'fc-btn-vague' },
@@ -115,10 +98,11 @@ const ratings = [
 const answered = computed(() => Object.values(counts.value).reduce((a, b) => a + b, 0));
 const recentLogs = computed(() => (props.reviewLogs || []).filter(l => current.value && l.bookId === current.value.bookId && l.key === current.value.key).slice(-5).reverse());
 const current = computed(() => queue.value.find(w => practice.value || (w.nextReview || 0) <= clock.value) || null);
-const dueCount = computed(() => props.words.filter(w => isDue(w, clock.value)).length);
-const newCount = computed(() => props.words.filter(w => !w.mastered && isNewCard(w)).length);
-const remainingNew = computed(() => newRemaining(props.reviewLogs, options.value, clock.value));
-const availableCount = computed(() => buildQueue(props.words, { now: clock.value, limit: batchSize.value, newLimit: remainingNew.value }).length);
+const availableCount = computed(() => buildQueue(props.words, { now: clock.value, limit: props.reviewOptions?.batchSize ?? 20, newLimit: newRemaining(props.reviewLogs, props.reviewOptions, clock.value) }).length);
+const nextDueText = computed(() => {
+  const future = props.words.filter(w => !w.mastered && w.nextReview > clock.value).map(w => w.nextReview);
+  return future.length ? `下次复习：${formatDate(Math.min(...future))}` : '今天先到这里。也可以提前练习，正式复习计划保持不变。';
+});
 const nextWaitingText = computed(() => queue.value.length ? `下张卡片：${formatInterval(Math.min(...queue.value.map(w => w.nextReview)) - clock.value)}` : '本轮完成');
 const detailCache = new Map();
 const detail = ref(null);
@@ -126,6 +110,7 @@ const detailLoading = ref(false);
 let timer;
 let generation = 0;
 let pendingRequest = null;
+let disposed = false;
 
 watch(current, async card => {
   const token = ++generation;
@@ -143,30 +128,21 @@ watch(current, async card => {
   }
 });
 
-async function persistOptions() {
-  const data = await window.vocaAPI.saveReviewOptions(JSON.parse(JSON.stringify(options.value)));
-  emit('committed', data);
-  return data;
-}
-async function saveOptions() {
-  if (busy.value) return;
-  busy.value = true; message.value = '';
-  try { await persistOptions(); message.value = '复习设置已保存'; }
-  catch (e) { message.value = `保存失败：${e.message}`; }
-  finally { busy.value = false; }
-}
 async function startSession(usePractice) {
   if (busy.value) return;
   busy.value = true; message.value = '';
+  mode.value = 'loading';
   try {
-    const data = await persistOptions();
+    const data = await window.vocaAPI.loadData();
+    if (disposed) return;
+    emit('committed', data);
     practice.value = usePractice;
     clock.value = Date.now();
-    queue.value = buildQueue(data.flashPool || [], { now: clock.value, limit: batchSize.value, newLimit: newRemaining(data.reviewLogs, data.reviewOptions, clock.value), practice: usePractice });
+    queue.value = buildQueue(data.flashPool || [], { now: clock.value, limit: data.reviewOptions?.batchSize ?? 20, newLimit: newRemaining(data.reviewLogs, data.reviewOptions, clock.value), practice: usePractice });
     counts.value = {};
     if (queue.value.length) mode.value = 'session';
-    else message.value = '暂无待复习卡片，稍后再来。';
-  } catch (e) { message.value = `开始失败：${e.message}`; }
+    else mode.value = 'idle';
+  } catch (e) { mode.value = 'idle'; message.value = `开始失败：${e.message}`; }
   finally { busy.value = false; }
 }
 async function flip() {
@@ -213,15 +189,14 @@ function onKey(e) {
   if (e.code === 'Space') { e.preventDefault(); flip(); }
   else if (/^Digit[1-4]$/.test(e.code) && flipped.value) { e.preventDefault(); answer(Number(e.code.slice(-1))); }
 }
-onMounted(() => { timer = setInterval(() => { clock.value = Date.now(); }, 1000); document.addEventListener('keydown', onKey); });
-onUnmounted(() => { clearInterval(timer); generation++; document.removeEventListener('keydown', onKey); });
+onMounted(() => { timer = setInterval(() => { clock.value = Date.now(); }, 1000); document.addEventListener('keydown', onKey); startSession(false); });
+onUnmounted(() => { disposed = true; clearInterval(timer); generation++; document.removeEventListener('keydown', onKey); });
 </script>
 
 <style scoped>
-.review-options { display: grid; gap: 8px; width: 100%; }
+.idle-actions { width: min(360px, 85%); display: grid; gap: 10px; }
+.settings-link { background: transparent; color: #eee; border: 0; cursor: pointer; padding: 6px; }
 .review-log { font-size: 12px; color: #e0dcf2; line-height: 1.6; }
-.review-options label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
-.review-options input, .review-options select { width: 150px; padding: 6px; border-radius: 6px; border: 1px solid #ddd; color: #29233e; background: white; }
 .fc-message { color: #ffe6a7; font-size: 13px; text-align: center; max-width: 700px; }
 .exit-session { background: transparent; color: white; border: 1px solid #ffffff70; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
@@ -233,35 +208,7 @@ button:disabled { opacity: .5; cursor: default; }
   height: 100%; overflow-y: auto;
 }
 
-/* ── Setup ─────────────────────────────────────────────── */
-.fc-setup {
-  flex: 1; display: flex; align-items: center; justify-content: center; padding: 20px;
-}
-.setup-card {
-  background: rgba(255,255,255,0.12); backdrop-filter: blur(12px);
-  border: 1px solid rgba(255,255,255,0.2);
-  border-radius: 24px; padding: 24px 32px;
-  display: flex; flex-direction: column; align-items: center; gap: 14px;
-  width: 100%; max-width: 420px; color: white;
-}
-.setup-icon { font-size: 48px; }
-.setup-card h2 { font-size: 22px; font-weight: 700; margin: 0; }
-.setup-stats { display: flex; align-items: center; gap: 8px; font-size: 14px; opacity: 0.85; }
-.stat-due { color: #ffd066; font-weight: 600; }
-.stat-sep { opacity: 0.4; }
-.setup-section-label { font-size: 12px; opacity: 0.6; text-transform: uppercase; letter-spacing: .5px; margin-top: 4px; }
-.setup-counts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
-.cnt-btn {
-  padding: 8px 16px; border-radius: 10px; border: 1.5px solid rgba(255,255,255,0.3);
-  background: transparent; color: rgba(255,255,255,0.8); font-size: 14px; font-weight: 600;
-  cursor: pointer; font-family: inherit; transition: all 0.15s;
-}
-.cnt-btn:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.6); }
-.cnt-btn.active { background: white; color: #764ba2; border-color: white; }
-.setup-hint { font-size: 12px; opacity: 0.55; text-align: center; }
-.setup-empty { text-align: center; display: flex; flex-direction: column; gap: 6px; }
-.setup-empty p { font-size: 16px; opacity: 0.85; }
-.setup-empty-hint { font-size: 12px; opacity: 0.5; }
+.setup-hint { font-size: 13px; color: #e1def1; text-align: center; max-width: 85%; line-height: 1.6; }
 .btn-start {
   width: 100%; padding: 13px; background: white; color: #764ba2;
   border: none; border-radius: 12px; font-size: 15px; font-weight: 700;
@@ -410,13 +357,6 @@ button:disabled { opacity: .5; cursor: default; }
 .btn-label { font-size: 13px; font-weight: 700; }
 .fc-next { font-size: 11px; opacity: 0.55; font-weight: 400; }
 @media (max-height: 650px) {
-  .fc-setup { padding: 12px; }
-  .setup-icon { display: none; }
-  .setup-card { gap: 8px; padding: 16px 24px; }
-  .setup-card h2 { margin: 0; font-size: 20px; }
-  .setup-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); width: 100%; }
-  .cnt-btn { padding: 6px 3px; }
-  .setup-section-label { margin-top: 0; }
   .btn-start, .btn-start-all { padding: 8px; }
   .session-header { padding: 8px 16px; }
   .session-footer { padding: 8px 16px; }

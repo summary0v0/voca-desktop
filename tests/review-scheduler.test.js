@@ -114,5 +114,7 @@ test('statistics update on each answer using local calendar boundaries', () => {
 test('higher retention shortens mature intervals and options reject invalid ranges', () => {
   const word = fixture({ interval: 30, reviewCount: 8, lastReview: NOW - 30 * DAY }).flashPool[0];
   assert.ok(previewReview(word, { retention: .95 }, NOW).choices[3].intervalMs < previewReview(word, { retention: .8 }, NOW).choices[3].intervalMs);
-  for (const options of [{ retention: 1 }, { newPerDay: -1 }, { newPerDay: 1.5 }, { relearnMinutes: 0 }]) assert.throws(() => reviewOptions(options));
+  assert.equal(reviewOptions({ retention: .9 }).batchSize, 20);
+  assert.equal(reviewOptions({ batchSize: -1 }).batchSize, -1);
+  for (const options of [{ retention: 1 }, { newPerDay: -1 }, { newPerDay: 1.5 }, { relearnMinutes: 0 }, { batchSize: 0 }]) assert.throws(() => reviewOptions(options));
 });
