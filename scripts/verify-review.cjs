@@ -163,8 +163,49 @@ app.whenReady().then(async () => {
     await openReview();
     await waitFor(`document.querySelector('.shp-counter')?.textContent.includes('剩余 10 张')`);
     assert.equal(optionWrites, 1);
+    // Short phrases get the full card width. Long passages remain readable and
+    // scroll inside the card while the rating controls stay on screen.
+    async function passage(word, translation) {
+      await click('.exit-session');
+      data = fresh();
+      const entry = { bookId: 'default', key: 'sentence', word, translation };
+      data.flashPool = [entry];
+      data.books.default.words = { sentence: clone(entry) };
+      await openReview();
+      await waitFor(`document.querySelector('.wc-word')?.textContent === ${JSON.stringify(word)}`);
+      assert.equal(await js(`!!document.querySelector('.detail-panel')`), false);
+      assert.equal(await js(`document.querySelector('.word-card').getBoundingClientRect().width / document.querySelector('.session-body').clientWidth > .85`), true);
+      assert.equal(await js(`document.querySelector('.wc-word').scrollWidth <= document.querySelector('.wc-word').clientWidth + 1`), true);
+    }
+    win.setContentSize(1060, 740);
+    await passage('she is walking with purpose', '她正目标明确地走着。');
+    assert.equal(await js(`document.querySelector('.wc-word').offsetHeight <= parseFloat(getComputedStyle(document.querySelector('.wc-word')).lineHeight) * 1.1`), true);
+    await snapshot('sentence-question');
+    await click('.toggle-details');
+    await waitFor(`!!document.querySelector('.detail-panel')`);
+    assert.equal(await js(`document.querySelector('.toggle-details').getAttribute('aria-expanded')`), 'true');
+    await click('.toggle-details');
+    await click('.fc-session .word-card');
+    await waitFor(`!!document.querySelector('.wc-trans')`);
+    await snapshot('sentence-answer');
+    win.setContentSize(860, 520);
+    const longText = 'When we learn something new, we need enough room to read the entire sentence and understand its meaning.\n'.repeat(40).trim();
+    const longTranslation = '学习新知识时，需要足够的空间阅读完整句子，并理解它的意思。\n'.repeat(30).trim();
+    await passage(longText, longTranslation);
+    assert.equal(await js(`document.querySelector('.word-card').scrollHeight > document.querySelector('.word-card').clientHeight`), true);
+    assert.equal(await js(`document.querySelector('.wc-word').getBoundingClientRect().top >= document.querySelector('.word-card').getBoundingClientRect().top`), true);
+    await snapshot('long-passage-small');
+    await click('.fc-session .word-card');
+    await waitFor(`!!document.querySelector('.wc-trans')`);
+    await js(`document.querySelector('.word-card').scrollTop = document.querySelector('.word-card').scrollHeight`);
+    assert.equal(await js(`document.querySelector('.wc-trans').getBoundingClientRect().bottom <= document.querySelector('.word-card').getBoundingClientRect().bottom + 1`), true);
+    assert.equal(await js(`document.querySelector('.fc-btn-easy').getBoundingClientRect().bottom <= innerHeight`), true);
+    await snapshot('long-passage-answer-small');
+    await passage('没有空格的中文长句同样应该能够自动换行，完整显示在更宽的背诵区域里。'.repeat(8), '中文句子测试');
+    await passage('a'.repeat(500), '超长连续文本也不会撑开页面。');
+    assert.equal(await js(`document.querySelector('.fc').scrollWidth <= document.querySelector('.fc').clientWidth + 1`), true);
     assert.deepEqual(errors, []);
-    const report = { passed: true, checks: ['settings relocation and save retry', 'automatic review entry without settings writes', 'hidden answers', 'four ratings', 'failure retry', 'double-click suppression', 'per-answer persistence', 'short-term waiting', 'resume', 'practice isolation', 'empty and no-due states', 'persisted batch size', 'small window'], screenshots: out };
+    const report = { passed: true, checks: ['settings relocation and save retry', 'automatic review entry without settings writes', 'hidden answers', 'four ratings', 'failure retry', 'double-click suppression', 'per-answer persistence', 'short-term waiting', 'resume', 'practice isolation', 'empty and no-due states', 'persisted batch size', 'small window', 'wide sentences and collapsible records', 'multiline long passages and translations', 'Chinese and unbroken text wrapping'], screenshots: out };
     fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
     app.exit(0);

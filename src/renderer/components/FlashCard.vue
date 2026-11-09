@@ -27,17 +27,19 @@
     </div>
 
     <div class="fc-session" v-else-if="mode === 'session' && current">
-      <div class="session-header"><span class="sh-title">{{ practice ? '提前练习 · 不改计划' : '闪卡复习' }}</span><span class="shp-counter">已答 {{ answered }} 次 · 剩余 {{ queue.length }} 张</span><button class="exit-session" :disabled="busy" @click="emit('close-review')">结束本轮</button></div>
-      <div class="session-body">
-        <div class="word-card" :class="{ flipped }" @click="flip">
-          <div class="wc-badge badge-learning">{{ stageLabel(current) }}</div>
-          <div class="wc-word">{{ current.word }}</div>
-          <div class="wc-phonetic" v-if="flipped && detail?.phonetic">{{ detail.phonetic }}</div>
-          <button class="wc-tts" @click.stop="speak" title="朗读">🔊</button>
-          <div class="wc-trans" v-if="flipped">{{ current.translation || '暂无中文释义' }}</div>
-          <div class="wc-hint" v-else>先回忆含义，再翻面核对</div>
+      <div class="session-header"><span class="sh-title">{{ practice ? '提前练习 · 不改计划' : '闪卡复习' }}</span><span class="shp-counter">已答 {{ answered }} 次 · 剩余 {{ queue.length }} 张</span><div class="session-actions"><button v-if="isPassage" class="toggle-details" :aria-expanded="showDetails" aria-controls="review-details" @click="showDetails = !showDetails">{{ showDetails ? '收起学习记录' : '显示学习记录' }}</button><button class="exit-session" :disabled="busy" @click="emit('close-review')">结束本轮</button></div></div>
+      <div class="session-body" :class="{ 'reading-wide': isPassage && !showDetails }">
+        <div ref="cardElement" class="word-card" :class="{ flipped, 'passage-card': isPassage, 'long-text': contentLength > 100, 'very-long-text': contentLength > 500 }" @click="flip">
+          <div class="card-content">
+            <div class="wc-badge badge-learning">{{ stageLabel(current) }}</div>
+            <div class="wc-word">{{ current.word }}</div>
+            <div class="wc-phonetic" v-if="flipped && detail?.phonetic">{{ detail.phonetic }}</div>
+            <button class="wc-tts" @click.stop="speak" title="朗读">🔊</button>
+            <div class="wc-trans" v-if="flipped">{{ current.translation || '暂无中文释义' }}</div>
+            <div class="wc-hint" v-else>先回忆含义，再翻面核对</div>
+          </div>
         </div>
-        <div class="detail-panel"><div class="dp-scroll">
+        <div v-if="!isPassage || showDetails" class="detail-panel" id="review-details"><div class="dp-scroll">
           <div class="dp-empty" v-if="!flipped">释义、例句和同义词将在翻面后显示</div>
           <template v-else>
             <template v-if="detail?.meanings?.length">
@@ -73,7 +75,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { useTTS } from '../composables/useTTS.js';
 import { cardId, buildQueue, newRemaining, stageLabel, formatInterval, DAY } from '../composables/review-queue.mjs';
 
@@ -98,6 +100,10 @@ const ratings = [
 const answered = computed(() => Object.values(counts.value).reduce((a, b) => a + b, 0));
 const recentLogs = computed(() => (props.reviewLogs || []).filter(l => current.value && l.bookId === current.value.bookId && l.key === current.value.key).slice(-5).reverse());
 const current = computed(() => queue.value.find(w => practice.value || (w.nextReview || 0) <= clock.value) || null);
+const contentLength = computed(() => Array.from(current.value?.word || '').length);
+const isPassage = computed(() => /\s/.test(current.value?.word?.trim() || '') || contentLength.value > 28);
+const showDetails = ref(false);
+const cardElement = ref(null);
 const availableCount = computed(() => buildQueue(props.words, { now: clock.value, limit: props.reviewOptions?.batchSize ?? 20, newLimit: newRemaining(props.reviewLogs, props.reviewOptions, clock.value) }).length);
 const nextDueText = computed(() => {
   const future = props.words.filter(w => !w.mastered && w.nextReview > clock.value).map(w => w.nextReview);
@@ -115,11 +121,15 @@ let disposed = false;
 watch(current, async card => {
   const token = ++generation;
   flipped.value = false;
+  showDetails.value = false;
   detail.value = null;
   detailLoading.value = false;
   preview.value = null;
   pendingRequest = null;
   if (!card) return;
+  await nextTick();
+  if (token !== generation) return;
+  if (cardElement.value) cardElement.value.scrollTop = 0;
   if (!practice.value) {
     try {
       const result = await window.vocaAPI.previewReview({ bookId: card.bookId, key: card.key });
@@ -148,6 +158,12 @@ async function startSession(usePractice) {
 async function flip() {
   if (busy.value || !current.value) return;
   flipped.value = !flipped.value;
+  await nextTick();
+  if (contentLength.value > 100 && cardElement.value) {
+    const element = cardElement.value;
+    const answerElement = element.querySelector('.wc-trans');
+    element.scrollTop = answerElement ? element.scrollTop + answerElement.getBoundingClientRect().top - element.getBoundingClientRect().top - 24 : 0;
+  }
   if (!flipped.value || detail.value || detailLoading.value) return;
   const token = generation;
   const word = current.value.word.trim().toLowerCase();
@@ -199,6 +215,8 @@ onUnmounted(() => { disposed = true; clearInterval(timer); generation++; documen
 .review-log { font-size: 12px; color: #e0dcf2; line-height: 1.6; }
 .fc-message { color: #ffe6a7; font-size: 13px; text-align: center; max-width: 700px; }
 .exit-session { background: transparent; color: white; border: 1px solid #ffffff70; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+.session-actions { display: flex; gap: 10px; align-items: center; }
+.toggle-details { background: transparent; border: 0; color: #f1edff; padding: 6px 0; cursor: pointer; font: inherit; font-size: 12px; }
 button:disabled { opacity: .5; cursor: default; }
 .fc-btn-easy { background: #fff; color: #6052c5; }
 .fc {
@@ -256,19 +274,22 @@ button:disabled { opacity: .5; cursor: default; }
 .shp-counter { font-size: 13px; color: rgba(255,255,255,0.7); font-weight: 600; white-space: nowrap; }
 
 .session-body {
-  flex: 1; display: flex; gap: 20px; padding: 0 24px 16px; overflow: hidden;
+  flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 30%);
+  gap: 16px; padding: 0 24px 16px; overflow: hidden;
 }
+.session-body.reading-wide { grid-template-columns: minmax(0, 1fr); }
 
 /* Word card */
 .word-card {
-  flex-shrink: 0; width: 280px;
+  min-width: 0; min-height: 0; width: auto; overflow-y: auto; overflow-x: hidden;
   background: white; border-radius: 20px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  padding: 28px 24px; gap: 8px;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 28px 24px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.18);
   cursor: pointer; user-select: none;
   transition: transform 0.15s;
 }
+.card-content { width: 100%; max-width: 72ch; flex: 0 0 auto; margin-block: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .word-card:hover { transform: translateY(-2px); }
 
 .wc-badge {
@@ -280,14 +301,18 @@ button:disabled { opacity: .5; cursor: default; }
 .badge-familiar { background: #e3f2fd; color: #1565c0; }
 .badge-mastered { background: #fce4ec; color: #c62828; }
 
-.wc-word { font-size: 36px; font-weight: 800; color: #1a1a1a; text-align: center; line-height: 1.1; }
+.wc-word { width: 100%; font-size: 36px; font-weight: 800; color: #1a1a1a; text-align: center; line-height: 1.25; white-space: pre-wrap; overflow-wrap: anywhere; }
+.passage-card .wc-word { font-size: 30px; font-weight: 650; line-height: 1.6; }
+.long-text .wc-word { font-size: 24px; text-align: left; }
+.very-long-text .wc-word { font-size: 19px; }
 .wc-phonetic { font-size: 13px; color: #999; }
 .wc-tts {
   background: none; border: none; font-size: 18px; cursor: pointer;
   opacity: 0.5; padding: 4px; border-radius: 6px; transition: opacity 0.15s;
 }
 .wc-tts:hover { opacity: 1; }
-.wc-trans { font-size: 22px; font-weight: 700; color: #4a90d9; text-align: center; margin-top: 8px; }
+.wc-trans { width: 100%; font-size: 22px; font-weight: 600; color: #4a90d9; text-align: center; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; }
+.long-text .wc-trans { font-size: 19px; text-align: left; }
 .wc-hint { font-size: 12px; color: #bbb; margin-top: 8px; }
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
@@ -295,7 +320,7 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* Detail panel */
 .detail-panel {
-  flex: 1; background: rgba(20, 16, 40, 0.75); border-radius: 20px;
+  min-width: 0; min-height: 0; background: rgba(20, 16, 40, 0.75); border-radius: 20px;
   overflow: hidden; display: flex; flex-direction: column;
 }
 .dp-scroll {
@@ -332,7 +357,7 @@ button:disabled { opacity: .5; cursor: default; }
   background: rgba(255,255,255,0.06); border-radius: 10px; padding: 10px 12px;
   display: flex; flex-direction: column; gap: 3px;
 }
-.dp-stat-v { font-size: 18px; font-weight: 700; color: white; }
+.dp-stat-v { font-size: 16px; font-weight: 700; color: white; overflow-wrap: anywhere; }
 .dp-stat-l { font-size: 11px; color: rgba(255,255,255,0.4); }
 
 /* Session footer */
@@ -360,5 +385,14 @@ button:disabled { opacity: .5; cursor: default; }
   .btn-start, .btn-start-all { padding: 8px; }
   .session-header { padding: 8px 16px; }
   .session-footer { padding: 8px 16px; }
+}
+@media (max-width: 900px) {
+  .session-header { gap: 8px; flex-wrap: wrap; }
+  .session-actions { margin-left: auto; }
+  .session-body { padding: 0 16px 12px; gap: 12px; }
+  .word-card { padding: 22px 20px; }
+  .passage-card .wc-word { font-size: 26px; }
+  .long-text .wc-word { font-size: 22px; }
+  .very-long-text .wc-word { font-size: 18px; }
 }
 </style>
