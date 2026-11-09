@@ -61,3 +61,28 @@ test('review options save independently without rescheduling cards', t => {
   assert.throws(() => f.invoke('save-review-options', { retention: 2 }), /保持率/);
   assert.equal(f.read().reviewOptions.retention, .95);
 });
+
+test('overlay adds sentences to the target book and pool once, preserving review state', t => {
+  const f = fixture(t);
+  const req = { text: 'She is walking with purpose', translation: '她目标明确地走着。', action: 'add-to-pool' };
+  f.invoke('overlay-item', req);
+  f.invoke('overlay-item', req);
+  const data = f.read();
+  assert.equal(data.flashPool.filter(w => w.key === req.text.toLowerCase()).length, 1);
+  assert.equal(data.books.default.words[req.text.toLowerCase()].translation, req.translation);
+  const prior = data.flashPool.find(w => w.key === 'test');
+  f.invoke('overlay-item', { text: 'test', translation: 'different', action: 'add-to-pool' });
+  assert.deepEqual(f.read().flashPool.find(w => w.key === 'test'), prior);
+  f.invoke('overlay-item', { ...req, action: 'unsave' });
+  assert.equal(f.read().flashPool.some(w => w.key === req.text.toLowerCase()), false);
+});
+test('overlay status is read-only and failed saves do not report success', t => {
+  const f = fixture(t);
+  const before = fs.readFileSync(f.file, 'utf8');
+  const status = f.invoke('overlay-item', { text: 'test', action: 'status' });
+  assert.equal(status.inPool, true);
+  assert.equal(fs.readFileSync(f.file, 'utf8'), before);
+  f.fail(true);
+  assert.throws(() => f.invoke('overlay-item', { text: 'new', translation: '新', action: 'add-to-pool' }), /disk blocked/);
+  assert.equal(fs.readFileSync(f.file, 'utf8'), before);
+});

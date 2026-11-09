@@ -651,6 +651,29 @@ ipcMain.handle('load-words', () => {
   const bookId = data.saveBookId || data.activeBookId;
   return data.books[bookId]?.words || {};
 });
+ipcMain.handle('overlay-item', (_, request) => {
+  const text = typeof request?.text === 'string' ? request.text.trim() : '';
+  if (!text || text.length > 5000 || !['status', 'save', 'unsave', 'add-to-pool'].includes(request.action)) throw new Error('收藏请求无效');
+  const data = loadData();
+  const bookId = data.saveBookId || data.activeBookId;
+  const book = data.books[bookId];
+  if (!book) throw new Error('收藏目标词书不存在');
+  const key = text.toLowerCase();
+  const matches = w => w.bookId === bookId && w.key === key;
+  if (request.action === 'unsave') {
+    delete book.words[key];
+    data.flashPool = data.flashPool.filter(w => !matches(w));
+  } else if (request.action !== 'status') {
+    if (typeof request.translation !== 'string' || !request.translation.trim()) throw new Error('请等待翻译成功后再操作');
+    if (!book.words[key]) book.words[key] = { word: text, translation: request.translation, timestamp: Date.now(), reviewCount: 0 };
+    if (request.action === 'add-to-pool' && !data.flashPool.some(matches)) data.flashPool.push({ ...book.words[key], key, bookId });
+  }
+  if (request.action !== 'status') {
+    saveData(data);
+    mainWindow?.webContents.send('words-updated');
+  }
+  return { saved: !!book.words[key], inPool: data.flashPool.some(matches) };
+});
 ipcMain.handle('save-words', (_, words) => {
   const data = loadData();
   const bookId = data.saveBookId || data.activeBookId;
