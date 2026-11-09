@@ -1,358 +1,246 @@
 <template>
   <div class="fc">
-
-    <!-- ① Setup screen -->
     <div class="fc-setup" v-if="mode === 'setup'">
       <div class="setup-card">
         <div class="setup-icon">🗂</div>
         <h2>闪卡复习</h2>
-
-        <template v-if="words.length === 0">
-          <div class="setup-empty">
-            <p>闪卡池为空</p>
-            <p class="setup-empty-hint">请在生词本页面点击 ⚡ 将单词加入闪卡池</p>
-          </div>
-        </template>
-
+        <div v-if="!words.length" class="setup-empty">
+          <p>闪卡池为空</p><p class="setup-empty-hint">在生词本点击 ⚡ 将单词加入闪卡池</p>
+        </div>
         <template v-else>
-          <div class="setup-stats">
-            <span class="stat-due">{{ dueCount }} 词待复习</span>
-            <span class="stat-sep">·</span>
-            <span class="stat-total">共 {{ words.length }} 词</span>
+          <div class="setup-stats"><span class="stat-due">{{ dueCount }} 词到期</span><span>· {{ newCount }} 个新词</span></div>
+          <div class="review-options">
+            <label>目标保持率 <select v-model.number="options.retention"><option :value="0.8">80%</option><option :value="0.85">85%</option><option :value="0.9">90%（推荐）</option><option :value="0.95">95%</option><option :value="0.97">97%</option></select></label>
+            <label>每日新词上限 <input type="number" v-model.number="options.newPerDay" min="0" max="200"></label>
+            <label>重学间隔（分钟） <input type="number" v-model.number="options.relearnMinutes" min="1" max="60"></label>
           </div>
-
-          <div class="setup-section-label">每次复习数量</div>
-          <div class="setup-counts">
-            <button
-              v-for="n in countOptions"
-              :key="n.v"
-              class="cnt-btn"
-              :class="{ active: batchSize === n.v }"
-              @click="batchSize = n.v"
-            >{{ n.label }}</button>
-          </div>
-          <div class="setup-hint">
-            将随机取 {{ batchSizeLabel }} 词进行复习
-          </div>
-
-          <button class="btn-start" @click="startSession(false)">
-            开始复习待复习词 ({{ dueCount }})
-          </button>
-          <button class="btn-start-all" @click="startSession(true)">
-            复习全部单词 ({{ words.length }})
-          </button>
+          <div class="setup-hint">保持率越高，复习越频繁。今日还可学习 {{ remainingNew }} 个新词。</div>
+          <button class="btn-start-all" :disabled="busy" @click="saveOptions">保存复习设置</button>
+          <div class="setup-section-label">每轮最多开始的卡片数</div>
+          <div class="setup-counts"><button v-for="n in countOptions" :key="n" class="cnt-btn" :class="{ active: batchSize === n }" @click="batchSize = n">{{ n === -1 ? '全部' : n }}</button></div>
+          <div class="setup-hint">到期词优先，新词受每日限额控制；忘记的词会按重学间隔再次出现。</div>
+          <button class="btn-start" :disabled="busy || !availableCount" @click="startSession(false)">{{ availableCount ? `开始复习（${availableCount} 张）` : '今天暂时没有待复习卡片' }}</button>
+          <button class="btn-start-all" :disabled="busy" @click="startSession(true)">提前练习（不改变复习计划）</button>
         </template>
+        <p class="fc-message" role="status" v-if="message">{{ message }}</p>
       </div>
     </div>
 
-    <!-- ② Done screen -->
     <div class="fc-done" v-else-if="mode === 'done'">
-      <div class="done-icon">✅</div>
-      <h2>本轮完成！</h2>
-      <div class="done-stats">
-        <div class="done-stat"><div class="ds-n green">{{ counts.known }}</div><div class="ds-l">认识</div></div>
-        <div class="done-stat"><div class="ds-n orange">{{ counts.vague }}</div><div class="ds-l">模糊</div></div>
-        <div class="done-stat"><div class="ds-n red">{{ counts.unknown }}</div><div class="ds-l">不认识</div></div>
-      </div>
-      <button class="btn-start" @click="mode = 'setup'">重新选择</button>
+      <div class="done-icon">✅</div><h2>{{ practice ? '本轮练习完成' : '本轮复习完成' }}</h2>
+      <div class="done-stats"><div class="done-stat" v-for="r in ratings" :key="r.value"><div class="ds-n">{{ counts[r.value] || 0 }}</div><div class="ds-l">{{ r.label }}</div></div></div>
+      <p class="setup-hint">每次作答均已保存{{ practice ? '；正式复习计划保持不变' : '' }}。</p>
+      <button class="btn-start" @click="mode = 'setup'">返回复习</button>
     </div>
 
-    <!-- ③ Session screen -->
+    <div class="fc-done" v-else-if="mode === 'session' && !current">
+      <h2>这一批已答完，等待短时重学</h2>
+      <p>{{ nextWaitingText }}</p><p class="setup-hint">可以留在这里等待，或稍后从复习入口继续，进度已保存。</p>
+      <button class="btn-start" @click="mode = 'setup'">稍后继续</button>
+    </div>
+
     <div class="fc-session" v-else-if="mode === 'session' && current">
-      <!-- Header -->
-      <div class="session-header">
-        <span class="sh-title">单词复习</span>
-        <div class="sh-progress">
-          <div class="shp-bar"><div class="shp-fill" :style="{ width: progress + '%' }"></div></div>
-          <span class="shp-counter">{{ idx + 1 }} / {{ session.length }}</span>
-        </div>
-      </div>
-
-      <!-- Body -->
+      <div class="session-header"><span class="sh-title">{{ practice ? '提前练习 · 不改计划' : '闪卡复习' }}</span><span class="shp-counter">已答 {{ answered }} 次 · 剩余 {{ queue.length }} 张</span><button class="exit-session" :disabled="busy" @click="mode = 'setup'">结束本轮</button></div>
       <div class="session-body">
-        <!-- Left: word card -->
         <div class="word-card" :class="{ flipped }" @click="flip">
-          <div class="wc-badge" :class="memClass(current)">{{ memLabel(current) }}</div>
+          <div class="wc-badge badge-learning">{{ stageLabel(current) }}</div>
           <div class="wc-word">{{ current.word }}</div>
-          <div class="wc-phonetic" v-if="detail?.phonetic">{{ detail.phonetic }}</div>
+          <div class="wc-phonetic" v-if="flipped && detail?.phonetic">{{ detail.phonetic }}</div>
           <button class="wc-tts" @click.stop="speak" title="朗读">🔊</button>
-          <transition name="fade">
-            <div class="wc-trans" v-if="flipped">{{ current.translation }}</div>
-            <div class="wc-hint" v-else>点击翻转查看释义</div>
-          </transition>
+          <div class="wc-trans" v-if="flipped">{{ current.translation || '暂无中文释义' }}</div>
+          <div class="wc-hint" v-else>先回忆含义，再翻面核对</div>
         </div>
-
-        <!-- Right: detail panel -->
-        <div class="detail-panel">
-          <div class="dp-scroll">
+        <div class="detail-panel"><div class="dp-scroll">
+          <div class="dp-empty" v-if="!flipped">释义、例句和同义词将在翻面后显示</div>
+          <template v-else>
             <template v-if="detail?.meanings?.length">
               <div class="dp-meaning" v-for="(m, mi) in detail.meanings" :key="mi">
-                <div class="dp-pos">{{ m.partOfSpeech.toUpperCase() }}</div>
-                <ul class="dp-defs">
-                  <li v-for="(d, di) in m.definitions" :key="di">
-                    <span class="dp-def-text">{{ d.definition }}</span>
-                    <span class="dp-example" v-if="d.example">"{{ d.example }}"</span>
-                  </li>
-                </ul>
-                <div class="dp-tags" v-if="m.synonyms?.length">
-                  <span class="dp-tag-label">同义词</span>
-                  <span class="dp-tag syn" v-for="s in m.synonyms" :key="s">{{ s }}</span>
-                </div>
-                <div class="dp-tags" v-if="m.antonyms?.length">
-                  <span class="dp-tag-label ant">反义词</span>
-                  <span class="dp-tag ant" v-for="s in m.antonyms" :key="s">{{ s }}</span>
-                </div>
+                <div class="dp-pos">{{ m.partOfSpeech?.toUpperCase() }}</div>
+                <ul class="dp-defs"><li v-for="(d, di) in m.definitions" :key="di"><span class="dp-def-text">{{ d.definition }}</span><span class="dp-example" v-if="d.example">{{ d.example }}</span></li></ul>
+                <div class="dp-tags" v-if="m.synonyms?.length"><span class="dp-tag-label">同义词</span><span class="dp-tag syn" v-for="s in m.synonyms" :key="s">{{ s }}</span></div>
+                <div class="dp-tags" v-if="m.antonyms?.length"><span class="dp-tag-label ant">反义词</span><span class="dp-tag ant" v-for="s in m.antonyms" :key="s">{{ s }}</span></div>
               </div>
             </template>
-            <div class="dp-loading" v-else-if="detailLoading">加载释义中…</div>
-            <div class="dp-empty" v-else>暂无英文释义</div>
-
-            <!-- Learning stats -->
-            <div class="dp-divider"></div>
-            <div class="dp-stats-title">学习记录</div>
-            <div class="dp-stats">
-              <div class="dp-stat">
-                <div class="dp-stat-v">{{ current.reviewCount || 0 }}</div>
-                <div class="dp-stat-l">复习次数</div>
-              </div>
-              <div class="dp-stat">
-                <div class="dp-stat-v">{{ current.interval || 1 }}天</div>
-                <div class="dp-stat-l">当前间隔</div>
-              </div>
-              <div class="dp-stat">
-                <div class="dp-stat-v">{{ Math.round((current.easeFactor || 2.5) * 100) }}%</div>
-                <div class="dp-stat-l">掌握系数</div>
-              </div>
-              <div class="dp-stat">
-                <div class="dp-stat-v">{{ current.lastReview ? fmtDate(current.lastReview) : '未复习' }}</div>
-                <div class="dp-stat-l">上次复习</div>
-              </div>
-            </div>
+            <div class="dp-loading" v-else-if="detailLoading">加载释义中…</div><div class="dp-empty" v-else>暂无英文释义</div>
+          </template>
+          <div class="dp-divider"></div><div class="dp-stats-title">学习记录</div>
+          <div class="dp-stats">
+            <div class="dp-stat"><div class="dp-stat-v">{{ current.reviewCount || 0 }}</div><div class="dp-stat-l">正式复习次数</div></div>
+            <div class="dp-stat"><div class="dp-stat-v">{{ stageLabel(current) }}</div><div class="dp-stat-l">学习阶段</div></div>
+            <div class="dp-stat"><div class="dp-stat-v">{{ current.nextReview ? formatDate(current.nextReview) : '未安排' }}</div><div class="dp-stat-l">下次复习</div></div>
+            <div class="dp-stat"><div class="dp-stat-v">{{ current.lastReview ? formatDate(current.lastReview) : '未复习' }}</div><div class="dp-stat-l">上次复习</div></div>
           </div>
-        </div>
+          <template v-if="flipped && recentLogs.length"><div class="dp-stats-title">最近作答</div><div class="review-log" v-for="log in recentLogs" :key="log.id">{{ formatDate(log.at) }} · {{ ratings.find(r => r.value === log.rating)?.label }} · {{ log.mode === 'practice' ? '提前练习' : '正式复习' }}</div></template>
+        </div></div>
       </div>
-
-      <!-- Footer -->
       <div class="session-footer">
-        <div class="fc-key-hint" v-if="!flipped">← 点击卡片翻转 / 按空格键 →</div>
+        <p class="fc-message" role="alert" v-if="message">{{ message }}</p>
+        <div class="fc-key-hint" v-if="!flipped">空格键 / 点击卡片翻面</div>
         <template v-else>
-          <div class="fc-btns">
-            <button class="fc-btn-unknown" @click="answer(0)">
-              <span class="btn-icon">✗</span>
-              <span class="btn-label">不认识</span>
-              <span class="fc-next">明天</span>
-            </button>
-            <button class="fc-btn-vague" @click="answer(1)">
-              <span class="btn-icon">≈</span>
-              <span class="btn-label">模糊</span>
-              <span class="fc-next">{{ fmt(nextVague) }}</span>
-            </button>
-            <button class="fc-btn-known" @click="answer(2)">
-              <span class="btn-icon">✓</span>
-              <span class="btn-label">认识</span>
-              <span class="fc-next">{{ fmt(nextKnown) }}</span>
-            </button>
-          </div>
-          <div class="fc-key-hint">⌨️ 1=不认识  2=模糊  3=认识</div>
+          <div class="fc-btns"><button v-for="r in ratings" :key="r.value" :class="r.class" :disabled="busy || (!practice && !preview)" @click="answer(r.value)"><span class="btn-label">{{ r.value }} · {{ r.label }}</span><span class="fc-next">{{ practice ? '不改计划' : preview ? formatInterval(preview.choices[r.value].intervalMs) : '计算中…' }}</span></button></div>
+          <div class="fc-key-hint">没想起来就选 1；“费力想起”表示独立答对，但回忆困难。</div>
         </template>
       </div>
     </div>
-
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useTTS } from '../composables/useTTS.js';
+import { cardId, isNewCard, isDue, buildQueue, newRemaining, stageLabel, formatInterval, DAY } from '../composables/review-queue.mjs';
 
-const props = defineProps({ words: Array });
-const emit = defineEmits(['update']);
+const props = defineProps({ words: { type: Array, default: () => [] }, reviewOptions: Object, reviewLogs: Array });
+const emit = defineEmits(['committed']);
 const { speak: ttsSpeak } = useTTS();
-
-const mode = ref('setup');   // 'setup' | 'session' | 'done'
-const session = ref([]);
-const idx = ref(0);
+const mode = ref('setup');
+const queue = ref([]);
+const practice = ref(false);
 const flipped = ref(false);
-const counts = ref({ known: 0, vague: 0, unknown: 0 });
+const busy = ref(false);
+const message = ref('');
+const preview = ref(null);
+const counts = ref({});
 const batchSize = ref(20);
-
-const countOptions = [
-  { v: 10, label: '10' }, { v: 20, label: '20' }, { v: 30, label: '30' },
-  { v: 50, label: '50' }, { v: 100, label: '100' }, { v: -1, label: '全部' },
+const clock = ref(Date.now());
+const options = ref({ retention: 0.9, newPerDay: 10, relearnMinutes: 10 });
+watch(() => props.reviewOptions, v => { options.value = { retention: 0.9, newPerDay: 10, relearnMinutes: 10, ...v }; }, { immediate: true });
+const countOptions = [10, 20, 30, 50, 100, -1];
+const ratings = [
+  { value: 1, label: '没想起来', class: 'fc-btn-unknown' },
+  { value: 2, label: '费力想起', class: 'fc-btn-vague' },
+  { value: 3, label: '正常想起', class: 'fc-btn-known' },
+  { value: 4, label: '轻松想起', class: 'fc-btn-easy' },
 ];
-
-const detailCache = {};
+const answered = computed(() => Object.values(counts.value).reduce((a, b) => a + b, 0));
+const recentLogs = computed(() => (props.reviewLogs || []).filter(l => current.value && l.bookId === current.value.bookId && l.key === current.value.key).slice(-5).reverse());
+const current = computed(() => queue.value.find(w => practice.value || (w.nextReview || 0) <= clock.value) || null);
+const dueCount = computed(() => props.words.filter(w => isDue(w, clock.value)).length);
+const newCount = computed(() => props.words.filter(w => !w.mastered && isNewCard(w)).length);
+const remainingNew = computed(() => newRemaining(props.reviewLogs, options.value, clock.value));
+const availableCount = computed(() => buildQueue(props.words, { now: clock.value, limit: batchSize.value, newLimit: remainingNew.value }).length);
+const nextWaitingText = computed(() => queue.value.length ? `下张卡片：${formatInterval(Math.min(...queue.value.map(w => w.nextReview)) - clock.value)}` : '本轮完成');
+const detailCache = new Map();
 const detail = ref(null);
 const detailLoading = ref(false);
+let timer;
+let generation = 0;
+let pendingRequest = null;
 
-const current = computed(() => session.value[idx.value] || null);
-const progress = computed(() => session.value.length ? (idx.value / session.value.length) * 100 : 0);
-
-const dueCount = computed(() => {
-  const now = Date.now();
-  return props.words.filter(w => !w.mastered && (!w.nextReview || w.nextReview <= now)).length;
-});
-
-const batchSizeLabel = computed(() => {
-  if (batchSize.value === -1) return props.words.length;
-  return Math.min(batchSize.value, props.words.length);
-});
-
-const nextVague = computed(() => calcNext(current.value, 1));
-const nextKnown = computed(() => calcNext(current.value, 2));
-
-function startSession(useAll) {
-  const now = Date.now();
-  let pool = useAll
-    ? [...props.words]
-    : props.words.filter(w => !w.mastered && (!w.nextReview || w.nextReview <= now));
-
-  // If no due words, fall back to full pool
-  if (pool.length === 0) pool = [...props.words];
-
-  pool = pool.sort(() => Math.random() - 0.5);
-  if (batchSize.value !== -1) pool = pool.slice(0, batchSize.value);
-
-  session.value = pool;
-  idx.value = 0;
+watch(current, async card => {
+  const token = ++generation;
   flipped.value = false;
-  counts.value = { known: 0, vague: 0, unknown: 0 };
   detail.value = null;
-  mode.value = 'session';
-  loadDetail();
-}
-
-function flip() {
-  flipped.value = !flipped.value;
-}
-
-async function loadDetail() {
-  if (!current.value) return;
-  const w = current.value.word.trim().toLowerCase();
-  if (!w || /\s/.test(w) || /[\u4e00-\u9fa5]/.test(w)) { detail.value = null; return; }
-  if (detailCache[w] !== undefined) { detail.value = detailCache[w]; return; }
-  detailLoading.value = true;
-  detail.value = null;
-  const res = await window.vocaAPI.getWordDetail(w);
-  const d = res.success ? res : null;
-  detailCache[w] = d;
-  detail.value = d;
   detailLoading.value = false;
-}
-
-function answer(q) {
-  const card = current.value;
+  preview.value = null;
+  pendingRequest = null;
   if (!card) return;
-  if (q === 2) counts.value.known++;
-  else if (q === 1) counts.value.vague++;
-  else counts.value.unknown++;
-  sm2(card, q);
-  emit('update', card);
-  if (idx.value < session.value.length - 1) {
-    idx.value++;
-    flipped.value = false;
-    detail.value = null;
-    loadDetail();
-  } else {
-    mode.value = 'done';
-    window.vocaAPI.updateStats(session.value.length);
+  if (!practice.value) {
+    try {
+      const result = await window.vocaAPI.previewReview({ bookId: card.bookId, key: card.key });
+      if (token === generation) preview.value = result;
+    } catch (e) { if (token === generation) message.value = `调度失败：${e.message}`; }
   }
-}
+});
 
-function speak() {
-  if (!current.value) return;
-  ttsSpeak(current.value.word, 'en-US');
+async function persistOptions() {
+  const data = await window.vocaAPI.saveReviewOptions(JSON.parse(JSON.stringify(options.value)));
+  emit('committed', data);
+  return data;
 }
-
-function calcNext(card, q) {
-  if (!card) return 1;
-  const { interval = 1, easeFactor = 2.5, reviewCount = 0 } = card;
-  if (q === 1) return Math.max(2, Math.round(interval * 1.2));
-  const eb = [1, 2, 4, 7, 15, 30];
-  return reviewCount < eb.length - 1 ? eb[reviewCount + 1] : Math.round(interval * easeFactor);
+async function saveOptions() {
+  if (busy.value) return;
+  busy.value = true; message.value = '';
+  try { await persistOptions(); message.value = '复习设置已保存'; }
+  catch (e) { message.value = `保存失败：${e.message}`; }
+  finally { busy.value = false; }
 }
-
-function sm2(card, q) {
-  if (!card.easeFactor) card.easeFactor = 2.5;
-  if (!card.reviewCount) card.reviewCount = 0;
-  card.reviewCount++;
-  const eb = [1, 2, 4, 7, 15, 30];
-  if (q === 0) {
-    card.interval = 1;
-    card.easeFactor = Math.max(1.3, card.easeFactor - 0.2);
-  } else if (q === 1) {
-    card.interval = Math.max(2, Math.round((card.interval || 1) * 1.2));
-    card.easeFactor = Math.max(1.3, card.easeFactor - 0.1);
-  } else {
-    const rc = card.reviewCount - 1;
-    card.interval = rc < eb.length - 1 ? eb[rc + 1] : Math.round((card.interval || 1) * card.easeFactor);
-    card.easeFactor = Math.max(1.3, card.easeFactor + 0.05);
-  }
-  card.nextReview = Date.now() + card.interval * 86400000;
-  card.lastReview = Date.now();
+async function startSession(usePractice) {
+  if (busy.value) return;
+  busy.value = true; message.value = '';
+  try {
+    const data = await persistOptions();
+    practice.value = usePractice;
+    clock.value = Date.now();
+    queue.value = buildQueue(data.flashPool || [], { now: clock.value, limit: batchSize.value, newLimit: newRemaining(data.reviewLogs, data.reviewOptions, clock.value), practice: usePractice });
+    counts.value = {};
+    if (queue.value.length) mode.value = 'session';
+    else message.value = '暂无待复习卡片，稍后再来。';
+  } catch (e) { message.value = `开始失败：${e.message}`; }
+  finally { busy.value = false; }
 }
-
-function fmt(d) {
-  if (d <= 1) return '明天';
-  if (d < 30) return `${d}天后`;
-  return `${Math.round(d / 30)}个月后`;
+async function flip() {
+  if (busy.value || !current.value) return;
+  flipped.value = !flipped.value;
+  if (!flipped.value || detail.value || detailLoading.value) return;
+  const token = generation;
+  const word = current.value.word.trim().toLowerCase();
+  if (/\s|[\u4e00-\u9fa5]/.test(word)) return;
+  if (detailCache.has(word)) { detail.value = detailCache.get(word); return; }
+  detailLoading.value = true;
+  try {
+    const result = await window.vocaAPI.getWordDetail(word);
+    const value = result.success ? result : null;
+    detailCache.set(word, value);
+    if (generation === token) detail.value = value;
+  } catch { /* Dictionary availability must not block reviews. */ }
+  finally { if (generation === token) detailLoading.value = false; }
 }
-
-function fmtDate(ts) {
-  const d = new Date(ts);
-  const now = new Date();
-  const diff = Math.round((now - d) / 86400000);
-  if (diff === 0) return '今天';
-  if (diff === 1) return '昨天';
-  if (diff < 30) return `${diff}天前`;
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+async function answer(rating) {
+  const card = current.value;
+  if (busy.value || !card || !flipped.value || (!practice.value && !preview.value)) return;
+  busy.value = true; message.value = '';
+  if (!pendingRequest) pendingRequest = { id: crypto.randomUUID(), bookId: card.bookId, key: card.key, rating, expectedLastReview: card.lastReview || 0, practice: practice.value };
+  try {
+    const result = await window.vocaAPI.reviewCard({ ...pendingRequest });
+    emit('committed', result.data);
+    const actualRating = pendingRequest.rating;
+    counts.value[actualRating] = (counts.value[actualRating] || 0) + 1;
+    const next = queue.value.filter(w => cardId(w) !== cardId(card));
+    const updated = result.word || result.data.flashPool.find(w => cardId(w) === cardId(card));
+    if (!practice.value && updated && [1, 3].includes(updated.fsrs?.state) && updated.nextReview < Date.now() + DAY) next.push(updated);
+    pendingRequest = null;
+    clock.value = Date.now();
+    queue.value = next;
+    if (!next.length) mode.value = 'done';
+  } catch (e) { message.value = `保存失败，当前卡片已保留；再次评分可重试：${e.message}`; }
+  finally { busy.value = false; }
 }
-
-function memLabel(w) {
-  const rc = w.reviewCount || 0;
-  const iv = w.interval || 1;
-  if (rc === 0) return '🌱 新词';
-  if (iv < 7) return '🌿 初记';
-  if (iv < 21) return '🌳 熟悉';
-  return '💎 掌握';
-}
-function memClass(w) {
-  const rc = w.reviewCount || 0;
-  const iv = w.interval || 1;
-  if (rc === 0) return 'badge-new';
-  if (iv < 7) return 'badge-learning';
-  if (iv < 21) return 'badge-familiar';
-  return 'badge-mastered';
-}
-
+function speak() { if (current.value) ttsSpeak(current.value.word, 'en-US'); }
+function formatDate(ts) { return new Date(ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 function onKey(e) {
-  if (mode.value !== 'session') return;
+  if (mode.value !== 'session' || busy.value || e.repeat || e.target?.closest('input, select, textarea, button')) return;
   if (e.code === 'Space') { e.preventDefault(); flip(); }
-  else if (e.code === 'Digit1' && flipped.value) answer(0);
-  else if (e.code === 'Digit2' && flipped.value) answer(1);
-  else if (e.code === 'Digit3' && flipped.value) answer(2);
+  else if (/^Digit[1-4]$/.test(e.code) && flipped.value) { e.preventDefault(); answer(Number(e.code.slice(-1))); }
 }
-
-onMounted(() => document.addEventListener('keydown', onKey));
-onUnmounted(() => document.removeEventListener('keydown', onKey));
+onMounted(() => { timer = setInterval(() => { clock.value = Date.now(); }, 1000); document.addEventListener('keydown', onKey); });
+onUnmounted(() => { clearInterval(timer); generation++; document.removeEventListener('keydown', onKey); });
 </script>
 
 <style scoped>
+.review-options { display: grid; gap: 8px; width: 100%; }
+.review-log { font-size: 12px; color: #e0dcf2; line-height: 1.6; }
+.review-options label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.review-options input, .review-options select { width: 150px; padding: 6px; border-radius: 6px; border: 1px solid #ddd; color: #29233e; background: white; }
+.fc-message { color: #ffe6a7; font-size: 13px; text-align: center; max-width: 700px; }
+.exit-session { background: transparent; color: white; border: 1px solid #ffffff70; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+.fc-btn-easy { background: #fff; color: #6052c5; }
 .fc {
   flex: 1; display: flex; flex-direction: column;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   min-height: 100%;
-  height: 100%;
+  height: 100%; overflow-y: auto;
 }
 
 /* ── Setup ─────────────────────────────────────────────── */
 .fc-setup {
-  flex: 1; display: flex; align-items: center; justify-content: center; padding: 32px;
+  flex: 1; display: flex; align-items: center; justify-content: center; padding: 20px;
 }
 .setup-card {
   background: rgba(255,255,255,0.12); backdrop-filter: blur(12px);
   border: 1px solid rgba(255,255,255,0.2);
-  border-radius: 24px; padding: 36px 40px;
+  border-radius: 24px; padding: 24px 32px;
   display: flex; flex-direction: column; align-items: center; gap: 14px;
   width: 100%; max-width: 420px; color: white;
 }
@@ -506,8 +394,8 @@ onUnmounted(() => document.removeEventListener('keydown', onKey));
   display: flex; flex-direction: column; align-items: center; gap: 8px;
 }
 .fc-key-hint { color: rgba(255,255,255,0.45); font-size: 12px; }
-.fc-btns { display: flex; gap: 10px; width: 100%; max-width: 520px; }
-.fc-btn-unknown, .fc-btn-vague, .fc-btn-known {
+.fc-btns { display: flex; gap: 10px; width: 100%; max-width: 720px; }
+.fc-btn-unknown, .fc-btn-vague, .fc-btn-known, .fc-btn-easy {
   flex: 1; padding: 12px 8px; border: none; border-radius: 14px;
   font-weight: 700; cursor: pointer;
   display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -521,4 +409,16 @@ onUnmounted(() => document.removeEventListener('keydown', onKey));
 .btn-icon { font-size: 16px; }
 .btn-label { font-size: 13px; font-weight: 700; }
 .fc-next { font-size: 11px; opacity: 0.55; font-weight: 400; }
+@media (max-height: 650px) {
+  .fc-setup { padding: 12px; }
+  .setup-icon { display: none; }
+  .setup-card { gap: 8px; padding: 16px 24px; }
+  .setup-card h2 { margin: 0; font-size: 20px; }
+  .setup-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); width: 100%; }
+  .cnt-btn { padding: 6px 3px; }
+  .setup-section-label { margin-top: 0; }
+  .btn-start, .btn-start-all { padding: 8px; }
+  .session-header { padding: 8px 16px; }
+  .session-footer { padding: 8px 16px; }
+}
 </style>

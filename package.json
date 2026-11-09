@@ -53,6 +53,7 @@
     "wait-on": "^9.0.4"
   },
   "dependencies": {
+    "ts-fsrs": "5.2.3",
     "uiohook-napi": "^1.5.5"
   }
 }

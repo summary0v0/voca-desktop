@@ -38,6 +38,9 @@ contextBridge.exposeInMainWorld('vocaAPI', {
   toggleOverlayPin:   ()           => ipcRenderer.invoke('toggle-overlay-pin'),
   // 统计
   updateStats:        (count)      => ipcRenderer.invoke('update-stats', count),
+  previewReview:      (identity)   => ipcRenderer.invoke('preview-review', identity),
+  reviewCard:         (request)    => ipcRenderer.invoke('review-card', request),
+  saveReviewOptions:  (options)    => ipcRenderer.invoke('save-review-options', options),
   // OCR
   captureRegionOcr:   (x, y, w, h) => ipcRenderer.invoke('capture-region-ocr', x, y, w, h),
   cancelScreenshot:   ()           => ipcRenderer.invoke('cancel-screenshot'),

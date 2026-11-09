@@ -32,6 +32,7 @@ function fixture(initialSettings, options = {}) {
       if (name === 'fs') return fakeFs;
       if (name === './selection-reader') return { createSelectionReader() {} };
       if (name === './selection-translation') return { createSelectionTranslationController() {} };
+      if (name === './review-scheduler') return require('../src/main/review-scheduler');
       return require(name);
     },
     __dirname: path.join(__dirname, '../src/main'),
@@ -152,4 +153,50 @@ test('translation uses the newly saved DeepL provider and a trimmed API key', as
   assert.equal(request.config.method, 'POST');
   assert.equal(request.config.headers.Authorization, 'DeepL-Auth-Key saved-key');
   assert.deepEqual(JSON.parse(request.config.body), { text: ['hello'], source_lang: 'EN', target_lang: 'DE' });
+});
+
+test('DeepL requests use supported language codes for Chinese and regional variants', async t => {
+  const cases = [
+    ['auto', 'zh-CN', { target_lang: 'ZH-HANS' }],
+    ['auto', 'zh-TW', { target_lang: 'ZH-HANT' }],
+    ['zh-CN', 'en', { source_lang: 'ZH', target_lang: 'EN' }],
+    ['zh-TW', 'en-US', { source_lang: 'ZH', target_lang: 'EN-US' }],
+    ['en', 'pt-BR', { source_lang: 'EN', target_lang: 'PT-BR' }],
+  ];
+  for (const [sourceLang, targetLang, expected] of cases) {
+    await t.test(`${sourceLang} to ${targetLang}`, async () => {
+      const f = fixture({ translateApi: 'deepl', deeplKey: 'test-key', sourceLang, targetLang }, {
+        fetch: async () => ({ ok: true, json: async () => ({ translations: [{ text: 'translated' }] }) }),
+      });
+      const result = await f.invoke('translate', 'hello');
+      assert.equal(result.success, true);
+      assert.equal(result.text, 'translated');
+      assert.deepEqual(JSON.parse(f.calls.fetches[0].config.body), { text: ['hello'], ...expected });
+    });
+  }
+});
+
+test('DeepL errors include the service explanation without exposing the saved API key', async () => {
+  const f = fixture({ translateApi: 'deepl', deeplKey: 'secret-test-key' }, {
+    fetch: async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ message: 'Value for target_lang not supported (secret-test-key)' }),
+    }),
+  });
+  const result = await f.invoke('translate', 'hello');
+  assert.equal(result.success, false);
+  assert.match(result.error, /DeepL HTTP 400/);
+  assert.match(result.error, /Value for target_lang not supported/);
+  assert.ok(!result.error.includes('secret-test-key'));
+  assert.equal(f.calls.fetches.length, 1);
+});
+
+test('DeepL preserves the HTTP status when the error response is not JSON', async () => {
+  const f = fixture({ translateApi: 'deepl', deeplKey: 'test-key' }, {
+    fetch: async () => ({ ok: false, status: 503, json: async () => { throw new SyntaxError('not JSON'); } }),
+  });
+  const result = await f.invoke('translate', 'hello');
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'DeepL HTTP 503');
 });

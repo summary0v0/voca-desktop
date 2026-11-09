@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { createSelectionReader } = require('./selection-reader');
 const { createSelectionTranslationController } = require('./selection-translation');
+const { previewReview, applyReview, reviewOptions, availableReviewCount } = require('./review-scheduler');
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 const RENDERER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
@@ -92,7 +93,9 @@ function loadData() {
 
 function saveData(data) {
   createDataBackup();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  const temporary = DATA_FILE + '.tmp';
+  fs.writeFileSync(temporary, JSON.stringify(data, null, 2), 'utf-8');
+  fs.renameSync(temporary, DATA_FILE);
   try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch {}
 }
 
@@ -226,16 +229,26 @@ async function doTranslate(text, sl, tl, settings) {
   if (api === 'deepl') {
     const deeplKey = settings.deeplKey?.trim();
     if (!deeplKey) throw new Error('请在设置中填写 DeepL API Key 并保存');
+    // DeepL uses script variants for Chinese and hyphens in regional codes.
+    const targetLang = tl.toUpperCase();
+    const deeplTargetLang = { 'ZH-CN': 'ZH-HANS', 'ZH-TW': 'ZH-HANT' }[targetLang] || targetLang;
     const res = await fetch('https://api-free.deepl.com/v2/translate', {
       method: 'POST',
       headers: { 'Authorization': `DeepL-Auth-Key ${deeplKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: [text],
         source_lang: sl === 'auto' ? undefined : sl.toUpperCase().split('-')[0],
-        target_lang: tl.toUpperCase().replace('-', '_'),
+        target_lang: deeplTargetLang,
       }),
     });
-    if (!res.ok) throw new Error(`DeepL HTTP ${res.status}`);
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const error = await res.json();
+        if (typeof error.message === 'string') detail = error.message.replaceAll(deeplKey, '[已隐藏]');
+      } catch { /* Keep the HTTP status if the service returns a non-JSON error. */ }
+      throw new Error(`DeepL HTTP ${res.status}${detail ? `：${detail}` : ''}`);
+    }
     const d = await res.json();
     return d.translations[0].text;
   }
@@ -358,9 +371,7 @@ function checkDueAndNotify() {
   try {
     if (!Notification.isSupported()) return;
     const data = loadData();
-    const pool = data.flashPool || [];
-    const now = Date.now();
-    const due = pool.filter(w => !w.mastered && (!w.nextReview || w.nextReview <= now)).length;
+    const due = availableReviewCount(data);
     if (due > 0) {
       const n = new Notification({
         title: 'Voca 复习提醒',
@@ -582,6 +593,26 @@ ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.handle('load-data', () => loadData());
 ipcMain.handle('save-data', (_, data) => { saveData(data); return true; });
+ipcMain.handle('preview-review', (_, identity) => {
+  const data = loadData();
+  const word = data.flashPool.find(w => w.bookId === identity.bookId && w.key === identity.key);
+  if (!word) throw new Error('卡片已被删除');
+  return previewReview(word, data.reviewOptions);
+});
+ipcMain.handle('review-card', (_, request) => {
+  const result = applyReview(loadData(), request);
+  if (!result.duplicate) {
+    saveData(result.data);
+    mainWindow?.webContents.send('words-updated');
+  }
+  return result;
+});
+ipcMain.handle('save-review-options', (_, input) => {
+  const data = loadData();
+  data.reviewOptions = reviewOptions({ ...data.reviewOptions, ...input });
+  saveData(data);
+  return data;
+});
 ipcMain.handle('list-backups', () => listBackups());
 ipcMain.handle('restore-backup', (_, backupPath) => restoreBackup(backupPath));
 ipcMain.handle('get-sync-status', () => ({
